@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal, Qt
 
 from src.bridge_client.client import BridgeClient
 from src.bridge_client.stream import SSEEventSource
@@ -186,7 +186,7 @@ class BridgeTracerController(QObject):
                 token=token,
                 http_client=self._worker_http_client
             )
-            self._worker.event_received.connect(self._on_stream_event)
+            self._worker.event_received.connect(self._on_stream_event, Qt.QueuedConnection)
             self._worker.start()
 
         self._on_recording_state_change(RecordingState.IDLE, self._recorder.state)
