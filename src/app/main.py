@@ -4,16 +4,16 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from src.ui.app_window import BridgeTracerWindow
+from src.ui.interactive_window import InteractiveTracerWindow
+from src.ui.sample_data import build_sample_events
 
 
 def main() -> int:
     app = QApplication(sys.argv)
-    window = BridgeTracerWindow()
+    window = InteractiveTracerWindow(events=build_sample_events())
     window.show()
     return app.exec()
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
