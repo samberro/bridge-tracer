@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import sys
+import faulthandler
+
+# Enable fault handler to print thread stack traces on crashes
+faulthandler.enable()
 
 from PySide6.QtWidgets import QApplication
 

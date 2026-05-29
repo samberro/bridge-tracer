@@ -195,8 +195,23 @@ class TimelineView(QGraphicsView):
             item.set_selected(eid == event_id)
 
     def populate_events(self, events: list[EventModel], visual_state: str = "main_desktop_timeline") -> None:
-        self._scene.clear()
+        # Remove and clear connectors first to prevent access violations during C++ teardown
+        for conn in list(self.connectors):
+            try:
+                self._scene.removeItem(conn)
+            except Exception:
+                pass
+        self.connectors.clear()
+
+        # Remove and clear card items
+        for item in list(self.items_map.values()):
+            try:
+                self._scene.removeItem(item)
+            except Exception:
+                pass
         self.items_map.clear()
+
+        self._scene.clear()
         
         if not events:
             return
