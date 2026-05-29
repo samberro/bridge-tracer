@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal
 
 from src.bridge_client.client import BridgeClient
 from src.bridge_client.stream import SSEEventSource
@@ -85,8 +85,9 @@ class ControllerStatus:
     recording_state: RecordingState = RecordingState.IDLE
 
 
-class BridgeTracerController:
+class BridgeTracerController(QObject):
     def __init__(self, *, client_factory: Callable[..., BridgeClient] = BridgeClient) -> None:
+        super().__init__()
         self._client_factory = client_factory
         self._client = None
         self._recorder = Recorder(on_state_change=self._on_recording_state_change)
