@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Visual Diff Config",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": [
+      "op",
+      "id",
+      "name",
+      "test",
+      "ref",
+      "out",
+      "threshold"
+    ],
+    "properties": {
+      "op": {
+        "type": "string",
+        "const": "visual_diff"
+      },
+      "id": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string"
+      },
+      "test": {
+        "type": "object",
+        "required": [
+          "img",
+          "viewport"
+        ],
+        "properties": {
+          "img": {
+            "type": "string"
+          },
+          "viewport": {
+            "$ref": "#/$defs/viewport"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ref": {
+        "type": "object",
+        "required": [
+          "img",
+          "viewport"
+        ],
+        "properties": {
+          "img": {
+            "type": "string"
+          },
+          "viewport": {
+            "$ref": "#/$defs/viewport"
+          }
+        },
+        "additionalProperties": false
+      },
+      "out": {
+        "type": "object",
+        "required": [
+          "diff"
+        ],
+        "properties": {
+          "diff": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "threshold": {
+        "type": "object",
+        "required": [
+          "mean",
+          "max_changed_ratio"
+        ],
+        "properties": {
+          "mean": {
+            "type": "number",
+            "default": 8.0
+          },
+          "max_changed_ratio": {
+            "type": "number",
+            "default": 0.12
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "additionalProperties": false
+  },
+  "$defs": {
+    "viewport": {
+      "type": "array",
+      "description": "[left, top, right, bottom]. Origin is top-left.",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "integer"
+      }
+    }
+  }
+}
+

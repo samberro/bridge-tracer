@@ -1,0 +1,33 @@
+[
+  {
+    "op": "visual_diff",
+    "id": "feature_namespace.feature_name.state",
+    "name": "Human readable feature state",
+    "test": {
+      "img": "visual-checks/current/feature_namespace.feature_name.state.png",
+      "viewport": [
+        0,
+        0,
+        1440,
+        900
+      ]
+    },
+    "ref": {
+      "img": "assets/mockups/mockup_set/feature_name.png",
+      "viewport": [
+        0,
+        0,
+        1440,
+        900
+      ]
+    },
+    "out": {
+      "diff": "visual-checks/diffs/feature_namespace.feature_name.state.diff.png"
+    },
+    "threshold": {
+      "mean": 8.0,
+      "max_changed_ratio": 0.12
+    }
+  }
+]
+

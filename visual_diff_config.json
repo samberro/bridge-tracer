@@ -1,0 +1,122 @@
+[
+  {
+    "op": "visual_diff",
+    "id": "bridge_tracer.event_detail_inspector",
+    "name": "Event Detail Inspector",
+    "test": {
+      "img": "visual-checks/current/bridge_tracer.event_detail_inspector.png",
+      "viewport": [
+        0,
+        0,
+        1440,
+        900
+      ]
+    },
+    "ref": {
+      "img": "assets/mockups/bridge_tracer/event_detail_inspector.png",
+      "viewport": [
+        0,
+        0,
+        1440,
+        900
+      ]
+    },
+    "out": {
+      "diff": "visual-checks/diffs/bridge_tracer.event_detail_inspector.diff.png"
+    },
+    "threshold": {
+      "mean": 8.0,
+      "max_changed_ratio": 0.12
+    }
+  },
+  {
+    "op": "visual_diff",
+    "id": "bridge_tracer.filter_recording_sidebar",
+    "name": "Filter Recording Sidebar",
+    "test": {
+      "img": "visual-checks/current/bridge_tracer.filter_recording_sidebar.png",
+      "viewport": [
+        0,
+        0,
+        1440,
+        900
+      ]
+    },
+    "ref": {
+      "img": "assets/mockups/bridge_tracer/filter_recording_sidebar.png",
+      "viewport": [
+        0,
+        0,
+        1440,
+        900
+      ]
+    },
+    "out": {
+      "diff": "visual-checks/diffs/bridge_tracer.filter_recording_sidebar.diff.png"
+    },
+    "threshold": {
+      "mean": 8.0,
+      "max_changed_ratio": 0.12
+    }
+  },
+  {
+    "op": "visual_diff",
+    "id": "bridge_tracer.main_desktop_timeline",
+    "name": "Main Desktop Timeline",
+    "test": {
+      "img": "visual-checks/current/bridge_tracer.main_desktop_timeline.png",
+      "viewport": [
+        0,
+        0,
+        1440,
+        900
+      ]
+    },
+    "ref": {
+      "img": "assets/mockups/bridge_tracer/main_desktop_timeline.png",
+      "viewport": [
+        0,
+        0,
+        1440,
+        900
+      ]
+    },
+    "out": {
+      "diff": "visual-checks/diffs/bridge_tracer.main_desktop_timeline.diff.png"
+    },
+    "threshold": {
+      "mean": 8.0,
+      "max_changed_ratio": 0.12
+    }
+  },
+  {
+    "op": "visual_diff",
+    "id": "bridge_tracer.timeline_filmstrip_focused",
+    "name": "Timeline Filmstrip Focused",
+    "test": {
+      "img": "visual-checks/current/bridge_tracer.timeline_filmstrip_focused.png",
+      "viewport": [
+        0,
+        0,
+        1440,
+        900
+      ]
+    },
+    "ref": {
+      "img": "assets/mockups/bridge_tracer/timeline_filmstrip_focused.png",
+      "viewport": [
+        0,
+        0,
+        1440,
+        900
+      ]
+    },
+    "out": {
+      "diff": "visual-checks/diffs/bridge_tracer.timeline_filmstrip_focused.diff.png"
+    },
+    "threshold": {
+      "mean": 8.0,
+      "max_changed_ratio": 0.12
+    }
+  }
+]

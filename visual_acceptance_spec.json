@@ -1,0 +1,132 @@
+{
+  "version": 1,
+  "project": "bridge_tracer",
+  "visual_diff_config_contract": {
+    "config": "visual_diff_config.json",
+    "schema": "visual_diff_config.schema.json",
+    "example": "visual_diff_config.example.json",
+    "rule": "When adding visual checks, append entries to visual_diff_config.json that conform to the schema and preserve all existing entries."
+  },
+  "global_pass_definition": {
+    "summary": "Visual pass means the implementation matches approved mockups in layout, spacing, typography, colors, proportions, component states, and behavior-relevant visual affordances.",
+    "must_match": [
+      "layout",
+      "spacing",
+      "alignment",
+      "typography",
+      "colors",
+      "density",
+      "component state",
+      "interaction affordance",
+      "viewport crop",
+      "approved reference mockup"
+    ],
+    "must_not_do": [
+      "Do not weaken thresholds to pass.",
+      "Do not delete old visual_diff_config.json entries.",
+      "Do not replace references without explicit mockup approval.",
+      "Do not rely only on numeric diff; inspect diff images and screenshots."
+    ]
+  },
+  "required_agent_steps": [
+    "Read visual_acceptance_spec.json before UI work.",
+    "Read visual_diff_config.schema.json before editing visual_diff_config.json.",
+    "Use visual_diff_config.example.json as the template for new entries.",
+    "Write or update functional tests before implementation.",
+    "Create or update a project-local screenshot capture script for the feature.",
+    "Capture screenshots into visual-checks/current/ using visual_diff_config.json ids.",
+    "Append new visual_diff_config.json entries without deleting old ones.",
+    "Run the full visual_diff_config.json, not only the current feature.",
+    "Inspect screenshots and diff images manually.",
+    "Fix visual and functional regressions before declaring completion."
+  ],
+  "required_tests": {
+    "functional": [
+      "Feature renders in the target UI state.",
+      "Primary user interaction works.",
+      "Edge cases are covered.",
+      "Failure or empty state is covered when relevant."
+    ],
+    "visual": [
+      "Screenshot capture script exists or was updated.",
+      "Screenshot output path matches visual_diff_config.json test.img.",
+      "Reference mockup exists.",
+      "Visual diff entry exists.",
+      "Full visual_diff_config.json passes."
+    ],
+    "regression": [
+      "Existing visual_diff_config.json entries are preserved.",
+      "Full visual diff suite is run before completion."
+    ]
+  },
+  "features": {
+    "bridge_tracer.event_detail_inspector": {
+      "reference_mockup": "assets/mockups/bridge_tracer/event_detail_inspector.png",
+      "visual_pass_means": [
+        "The screenshot viewport matches the reference mockup viewport.",
+        "Primary layout geometry matches.",
+        "Spacing, alignment, and component proportions match.",
+        "Colors and contrast match approved mockup intent.",
+        "Important states shown in the mockup are reproduced.",
+        "The visual diff passes thresholds and the diff image has no meaningful regressions."
+      ],
+      "required_tests": [
+        "Functional test for the UI state represented by this mockup.",
+        "Screenshot capture for this feature id.",
+        "Visual diff entry in visual_diff_config.json.",
+        "Regression run of the full visual_diff_config.json."
+      ]
+    },
+    "bridge_tracer.filter_recording_sidebar": {
+      "reference_mockup": "assets/mockups/bridge_tracer/filter_recording_sidebar.png",
+      "visual_pass_means": [
+        "The screenshot viewport matches the reference mockup viewport.",
+        "Primary layout geometry matches.",
+        "Spacing, alignment, and component proportions match.",
+        "Colors and contrast match approved mockup intent.",
+        "Important states shown in the mockup are reproduced.",
+        "The visual diff passes thresholds and the diff image has no meaningful regressions."
+      ],
+      "required_tests": [
+        "Functional test for the UI state represented by this mockup.",
+        "Screenshot capture for this feature id.",
+        "Visual diff entry in visual_diff_config.json.",
+        "Regression run of the full visual_diff_config.json."
+      ]
+    },
+    "bridge_tracer.main_desktop_timeline": {
+      "reference_mockup": "assets/mockups/bridge_tracer/main_desktop_timeline.png",
+      "visual_pass_means": [
+        "The screenshot viewport matches the reference mockup viewport.",
+        "Primary layout geometry matches.",
+        "Spacing, alignment, and component proportions match.",
+        "Colors and contrast match approved mockup intent.",
+        "Important states shown in the mockup are reproduced.",
+        "The visual diff passes thresholds and the diff image has no meaningful regressions."
+      ],
+      "required_tests": [
+        "Functional test for the UI state represented by this mockup.",
+        "Screenshot capture for this feature id.",
+        "Visual diff entry in visual_diff_config.json.",
+        "Regression run of the full visual_diff_config.json."
+      ]
+    },
+    "bridge_tracer.timeline_filmstrip_focused": {
+      "reference_mockup": "assets/mockups/bridge_tracer/timeline_filmstrip_focused.png",
+      "visual_pass_means": [
+        "The screenshot viewport matches the reference mockup viewport.",
+        "Primary layout geometry matches.",
+        "Spacing, alignment, and component proportions match.",
+        "Colors and contrast match approved mockup intent.",
+        "Important states shown in the mockup are reproduced.",
+        "The visual diff passes thresholds and the diff image has no meaningful regressions."
+      ],
+      "required_tests": [
+        "Functional test for the UI state represented by this mockup.",
+        "Screenshot capture for this feature id.",
+        "Visual diff entry in visual_diff_config.json.",
+        "Regression run of the full visual_diff_config.json."
+      ]
+    }
+  }
+}
