@@ -32,6 +32,11 @@ class BridgeTracerController:
             return self._recorder.sorted_events()
         return list(self._events)
 
+    def set_events(self, events: list[EventModel]) -> None:
+        """Seed the controller's standing events (used when the UI is opened
+        with sample/loaded data before any live recording)."""
+        self._events = list(events)
+
     def connect(self, base_url: str, token: str | None = None) -> ControllerStatus:
         self.disconnect()
         self._client = self._client_factory(base_url, token)
