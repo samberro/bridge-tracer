@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Callable
 
 from src.bridge_client.client import BridgeClient
+from src.core.bridge_log import map_log_event
 from src.core.recorder import Recorder
 from src.core.schemas import EventModel, RecordingMetadata, RecordingState
 from src.core.storage import RecordingStorage
@@ -24,6 +25,7 @@ class BridgeTracerController:
         self._client = None
         self._recorder = Recorder(on_state_change=self._on_recording_state_change)
         self._events: list[EventModel] = []
+        self._seen_ids: set[str] = set()
         self.status = ControllerStatus()
 
     @property
@@ -65,6 +67,7 @@ class BridgeTracerController:
     def start_recording(self) -> None:
         if self._recorder.state == RecordingState.STOPPED:
             self._recorder = Recorder(on_state_change=self._on_recording_state_change)
+        self._seen_ids = set()
         self._recorder.start()
         self._on_recording_state_change(RecordingState.IDLE, self._recorder.state)
 
@@ -72,6 +75,26 @@ class BridgeTracerController:
         if self._client is None:
             return 0
         return self._recorder.feed_many(self._client.list_events(since=since))
+
+    def pull_logs(self, *, limit: int | None = 500) -> int:
+        """Poll the bridge's /logs endpoint and feed NEW events into the
+        recorder. Returns the count of newly recorded events.
+
+        De-dupes by event id (each poll returns the last N logs), and only
+        records while RECORDING so polling outside a session is a no-op.
+        """
+        if self._client is None or self._recorder.state != RecordingState.RECORDING:
+            return 0
+        raw_events = self._client.fetch_logs(limit=limit)
+        new_count = 0
+        for raw in raw_events:
+            event = map_log_event(raw) if isinstance(raw, dict) else None
+            if event is None or event.id in self._seen_ids:
+                continue
+            if self._recorder.feed(event) is not None:
+                self._seen_ids.add(event.id)
+                new_count += 1
+        return new_count
 
     def stop_recording(self) -> RecordingMetadata:
         metadata = self._recorder.stop()

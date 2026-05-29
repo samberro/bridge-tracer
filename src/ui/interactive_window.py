@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -90,6 +90,12 @@ class InteractiveTracerWindow(QMainWindow):
         # Injectable path providers (overridden in tests; QFileDialog in app).
         self.save_path_provider: Callable[[], Optional[Path]] = self._ask_save_path
         self.open_path_provider: Callable[[], Optional[Path]] = self._ask_open_path
+
+        # Live polling of the bridge /logs endpoint while recording.
+        self.poll_interval_ms = 1000
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(self.poll_interval_ms)
+        self._poll_timer.timeout.connect(self._poll_once)
 
         self._build_ui()
         self._populate_events()
@@ -193,11 +199,46 @@ class InteractiveTracerWindow(QMainWindow):
     def _on_start(self) -> None:
         self.controller.start_recording()
         self._refresh_controls()
+        # Begin live ingestion from the bridge /logs stream. Pull immediately
+        # so the first events show without waiting a full interval. _poll_once
+        # updates the status itself (incl. error text), so it runs last.
+        self._poll_timer.start()
+        self._poll_once()
 
     def _on_stop(self) -> None:
+        self._poll_timer.stop()
         if self.controller.status.recording_state == RecordingState.RECORDING:
             self.controller.stop_recording()
+        self._rebuild_from_controller()
         self._refresh_controls()
+
+    def _poll_once(self) -> int:
+        """One ingestion tick. Returns count of new events. Surfaces bridge
+        errors in the status bar and stops polling rather than crashing."""
+        try:
+            new_count = self.controller.pull_logs()
+        except Exception as exc:  # BridgeAPIError, network, etc.
+            self._poll_timer.stop()
+            self.status_label.setText(f"poll error: {type(exc).__name__}")
+            return 0
+        if new_count:
+            self._rebuild_from_controller()
+        self._refresh_controls()
+        return new_count
+
+    # public alias for automation/tests
+    def poll_once(self) -> int:
+        return self._poll_once()
+
+    def _rebuild_from_controller(self) -> None:
+        keep = self.model.selected_event_id
+        self.model = TimelineViewModel(self.controller.events, selected_event_id=keep)
+        self._populate_events()
+        target = keep if any(e.id == keep for e in self.model.events) else (
+            self.model.events[-1].id if self.model.events else None
+        )
+        if target:
+            self.select_event(target)
 
     def _on_save(self) -> None:
         path = self.save_path_provider()
@@ -232,6 +273,8 @@ class InteractiveTracerWindow(QMainWindow):
             self._refresh_inspector()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        if getattr(self, "_poll_timer", None) is not None:
+            self._poll_timer.stop()
         try:
             self.event_list.itemSelectionChanged.disconnect(self._on_selection_changed)
         except (RuntimeError, TypeError):
@@ -246,7 +289,8 @@ class InteractiveTracerWindow(QMainWindow):
         self.start_btn.setEnabled(state != RecordingState.RECORDING)
         self.stop_btn.setEnabled(state == RecordingState.RECORDING)
         conn = "connected" if self.controller.status.connected else "disconnected"
-        self.status_label.setText(f"{state.value} · {conn}")
+        count = len(self.controller.events)
+        self.status_label.setText(f"{state.value} · {conn} · {count} events")
 
     def _refresh_inspector(self) -> None:
         detail = self.model.selected_detail()

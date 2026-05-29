@@ -86,6 +86,18 @@ class BridgeClient:
         params = {"since": since} if since else None
         return list(self._get("/trace/events", params=params))
 
+    def fetch_logs(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        """Pull bridge activity from the AI-Bridge ``GET /logs`` endpoint.
+
+        The real bridge exposes ``/logs`` (returning ``{"events": [...]}``),
+        not ``/trace/events``. This is the live source the recorder polls.
+        """
+        params = {"limit": limit} if limit is not None else None
+        payload = self._get("/logs", params=params)
+        if isinstance(payload, dict):
+            return list(payload.get("events", []))
+        return list(payload or [])
+
     def list_runs(self) -> list[dict[str, Any]]:
         return list(self._get("/trace/runs"))
 
