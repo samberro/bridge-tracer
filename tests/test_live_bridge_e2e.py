@@ -50,10 +50,18 @@ def test_records_from_the_real_running_bridge():
     controller.connect(URL, TOKEN)
     window = InteractiveTracerWindow(events=[], controller=controller)
 
-    window.start_btn.click()  # real click -> live poll of /logs
+    window.start_btn.click()  # real click -> live poll of /logs or SSE stream
     assert controller.status.recording_state == RecordingState.RECORDING
+    
+    # Wait/process events if streaming/async
+    import time
+    start = time.time()
+    while window.event_count() == 0 and time.time() - start < 3.0:
+        QApplication.processEvents()
+        time.sleep(0.05)
+
     recorded = window.event_count()
-    assert recorded > 0, "expected to record existing bridge /logs events"
+    assert recorded > 0, "expected to record existing bridge events"
 
     # Selecting the latest event populates the inspector.
     window.select_event(controller.events[-1].id)

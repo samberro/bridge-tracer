@@ -660,15 +660,23 @@ class MainWindow(QMainWindow):
 
     def _poll_once(self) -> int:
         try:
+            old_count = len(self.model.events)
             new_count = self.controller.pull_logs()
+            
+            current_count = len(self.controller.events)
+            added_via_stream = current_count - (old_count + new_count)
+            total_new = new_count + max(0, added_via_stream)
+            
+            if total_new > 0:
+                self._rebuild_from_controller()
+                self._refresh_controls()
+                return total_new
         except Exception as exc:
             self._poll_timer.stop()
             self.status_label.setText(f"poll error: {str(exc)[:80]}")
             return 0
-        if new_count:
-            self._rebuild_from_controller()
         self._refresh_controls()
-        return new_count
+        return 0
 
     # public alias for automation
     def poll_once(self) -> int:
