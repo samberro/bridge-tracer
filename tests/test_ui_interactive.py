@@ -67,6 +67,12 @@ def test_token_field_is_password_masked(window):
     assert window.token_edit.echoMode() == QLineEdit.Password
 
 
+def test_default_bridge_url_points_at_the_bridge_not_chat_app(window):
+    # Regression: default was http://localhost:8080 (the chat_app port), whose
+    # /logs returns 404 -> BridgeAPIError. The bridge listens on 127.0.0.1:8765.
+    assert window.url_edit.text() == "http://127.0.0.1:8765"
+
+
 # --- Start / Stop drive the recorder and toggle enabled-ness ----------------
 def test_start_then_stop_toggles_state_and_buttons(window):
     window.start_btn.click()
