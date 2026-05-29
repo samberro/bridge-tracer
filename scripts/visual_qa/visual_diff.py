@@ -14,9 +14,9 @@ YELLOW = "\033[93m"
 CYAN = "\033[96m"
 RESET = "\033[0m"
 
-PASS_MARK = "✅"
-FAIL_MARK = "❌"
-WARN_MARK = "⚠️"
+PASS_MARK = "[PASS]"
+FAIL_MARK = "[FAIL]"
+WARN_MARK = "[WARN]"
 
 
 def color(text: str, c: str) -> str:
