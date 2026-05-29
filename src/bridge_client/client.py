@@ -79,6 +79,16 @@ class BridgeClient:
             )
         return response.json()
 
+    def trace_available(self) -> bool:
+        try:
+            response = self._http.get(
+                self._url("/trace/events"),
+                headers=build_auth_headers(self._token),
+            )
+            return response.status_code != 404
+        except httpx.HTTPError:
+            return False
+
     # ------------------------------------------------------------------
     # Endpoints (BridgeTracer.md "Bridge API Assumptions")
     # ------------------------------------------------------------------

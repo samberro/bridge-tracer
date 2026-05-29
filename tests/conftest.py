@@ -9,3 +9,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+import pytest
+from PySide6.QtWidgets import QApplication
+
+@pytest.fixture(autouse=True)
+def flush_events_after_test():
+    yield
+    app = QApplication.instance()
+    if app:
+        app.processEvents()
