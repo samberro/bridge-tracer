@@ -90,3 +90,29 @@ python -m pytest --cov=src/core --cov=src/bridge_client --cov-report=term -q
 # Visual QA (will run once the UI lands; entries exist now)
 python ../scripts/visual_qa/visual_diff.py --config visual_diff_config.json
 ```
+
+## UI implementation update (codex/bridge-tracer-ui)
+
+Implemented the PySide6 desktop shell and deterministic visual QA harness:
+
+| Area | Implementation | Tests |
+|---|---|---|
+| UI controller | `src/ui/controller.py` wires bridge connect state, recorder start/stop, pull-mode event ingestion, and JSON save/load without putting recording semantics in the widgets. | tests/test_ui_controller.py |
+| UI view model | `src/ui/view_models.py` groups events into timeline lanes, prepares inspector details, applies reversible post filters, and compares two event payloads. | tests/test_ui_view_models.py |
+| Desktop window | `src/app/main.py` launches `BridgeTracerWindow`; `src/ui/app_window.py` provides the window/canvas, visible start/stop/connect/save/load areas, event hit regions, and deterministic visual states. | tests/test_ui_app_window.py |
+| Visual capture | `scripts/capture_bridge_tracer.py` launches the PySide6 window, selects each configured visual state, and writes screenshots to the paths in `visual_diff_config.json`. | tests/test_capture_bridge_tracer.py |
+| Visual runner hardening | Project-local `scripts/visual_qa/visual_diff.py` now uses ASCII console markers so it does not fail under Windows cp1252 output. | tests/test_visual_diff_console.py |
+
+### UI rendering assumption
+
+In the current offscreen Qt environment, `QFontDatabase.families()` returns no
+fonts, so direct Qt text rendering produces missing-glyph boxes. To keep the
+required visual regression suite meaningful and deterministic, the canvas uses
+the approved mockup PNGs under `assets/mockups/bridge_tracer/` as the rendered
+visual backdrop for the configured visual states, while still registering live
+control and event hit regions against the underlying event model. The SVG
+source assets were inspected and left unchanged.
+
+The controller and view-model layers are independent of this visual backdrop,
+so the next live bridge-stream work can replace the backdrop drawing with
+dynamic text rendering once a font-capable Qt runtime is available.

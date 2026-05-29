@@ -1,0 +1,6 @@
+pydantic
+httpx
+PySide6
+pytest
+pytest-cov
+Pillow
