@@ -120,7 +120,9 @@ class InteractiveTracerWindow(QMainWindow):
         bar.addWidget(title)
         bar.addSpacing(12)
 
-        self.url_edit = QLineEdit("http://localhost:8080")
+        # Default to the AI-Bridge's own address (127.0.0.1:8765). The old
+        # default (localhost:8080) was the chat_app port, whose /logs 404s.
+        self.url_edit = QLineEdit("http://127.0.0.1:8765")
         self.url_edit.setPlaceholderText("Bridge URL")
         self.url_edit.setFixedWidth(220)
         bar.addWidget(self.url_edit)
@@ -219,7 +221,9 @@ class InteractiveTracerWindow(QMainWindow):
             new_count = self.controller.pull_logs()
         except Exception as exc:  # BridgeAPIError, network, etc.
             self._poll_timer.stop()
-            self.status_label.setText(f"poll error: {type(exc).__name__}")
+            # Surface the actual reason (e.g. "404 from /logs" = wrong URL/port,
+            # "auth failure (401)" = bad token) so it's actionable.
+            self.status_label.setText(f"poll error: {str(exc)[:80]}")
             return 0
         if new_count:
             self._rebuild_from_controller()
