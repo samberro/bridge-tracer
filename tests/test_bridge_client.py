@@ -193,3 +193,33 @@ def test_sse_event_source_raises_on_auth_failure():
     with pytest.raises(BridgeAPIError):
         with SSEEventSource("http://bridge.test", token="t", http_client=http):
             pass
+
+
+# ---- trace_available --------------------------------------------------------
+def test_trace_available_happy_path():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/trace/events"
+        return httpx.Response(200, json=[])
+    c = _client(handler)
+    assert c.trace_available() is True
+
+
+def test_trace_available_unauthorized():
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, content=b"unauthorized")
+    c = _client(handler)
+    assert c.trace_available() is True
+
+
+def test_trace_available_not_found():
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, content=b"not found")
+    c = _client(handler)
+    assert c.trace_available() is False
+
+
+def test_trace_available_network_error():
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("network down")
+    c = _client(handler)
+    assert c.trace_available() is False

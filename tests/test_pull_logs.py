@@ -18,6 +18,8 @@ def _log(i, direction="output"):
 
 def _client(events_box):
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/trace/events":
+            return httpx.Response(404)
         assert request.url.path == "/logs"
         return httpx.Response(200, json={"events": list(events_box)})
     http = httpx.Client(transport=httpx.MockTransport(handler))

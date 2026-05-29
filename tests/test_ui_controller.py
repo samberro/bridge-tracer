@@ -19,6 +19,9 @@ class FakeBridgeClient:
         assert since is None or isinstance(since, str)
         return self.events
 
+    def trace_available(self) -> bool:
+        return True
+
     def close(self) -> None:
         self.closed = True
 
