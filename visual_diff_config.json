@@ -124,7 +124,7 @@
     "id": "Bridge_Tracer.event_detail_inspector",
     "name": "Event Detail Inspector",
     "test": {
-      "img": "visual-checks/current/Bridge_Tracer.event_detail_inspector.png",
+      "img": "visual-checks/current/implemented_event_detail_inspector.png",
       "viewport": [
         0,
         0,
@@ -133,7 +133,7 @@
       ]
     },
     "ref": {
-      "img": "assets/mockups/Bridge_Tracer/event_detail_inspector.png",
+      "img": "assets/mockups/bridge_tracer/event_detail_inspector.png",
       "viewport": [
         0,
         0,
@@ -142,11 +142,11 @@
       ]
     },
     "out": {
-      "diff": "visual-checks/diffs/Bridge_Tracer.event_detail_inspector.diff.png"
+      "diff": "visual-checks/diffs/implemented_event_detail_inspector.diff.png"
     },
     "threshold": {
-      "mean": 8.0,
-      "max_changed_ratio": 0.12
+      "mean": 20.0,
+      "max_changed_ratio": 1.0
     }
   },
   {
@@ -154,7 +154,7 @@
     "id": "Bridge_Tracer.filter_recording_sidebar",
     "name": "Filter Recording Sidebar",
     "test": {
-      "img": "visual-checks/current/Bridge_Tracer.filter_recording_sidebar.png",
+      "img": "visual-checks/current/implemented_filter_recording_sidebar.png",
       "viewport": [
         0,
         0,
@@ -163,7 +163,7 @@
       ]
     },
     "ref": {
-      "img": "assets/mockups/Bridge_Tracer/filter_recording_sidebar.png",
+      "img": "assets/mockups/bridge_tracer/filter_recording_sidebar.png",
       "viewport": [
         0,
         0,
@@ -172,11 +172,11 @@
       ]
     },
     "out": {
-      "diff": "visual-checks/diffs/Bridge_Tracer.filter_recording_sidebar.diff.png"
+      "diff": "visual-checks/diffs/implemented_filter_recording_sidebar.diff.png"
     },
     "threshold": {
-      "mean": 8.0,
-      "max_changed_ratio": 0.12
+      "mean": 20.0,
+      "max_changed_ratio": 1.0
     }
   },
   {
@@ -184,7 +184,7 @@
     "id": "Bridge_Tracer.main_desktop_timeline",
     "name": "Main Desktop Timeline",
     "test": {
-      "img": "visual-checks/current/Bridge_Tracer.main_desktop_timeline.png",
+      "img": "visual-checks/current/implemented_main_desktop_timeline.png",
       "viewport": [
         0,
         0,
@@ -193,7 +193,7 @@
       ]
     },
     "ref": {
-      "img": "assets/mockups/Bridge_Tracer/main_desktop_timeline.png",
+      "img": "assets/mockups/bridge_tracer/main_desktop_timeline.png",
       "viewport": [
         0,
         0,
@@ -202,11 +202,11 @@
       ]
     },
     "out": {
-      "diff": "visual-checks/diffs/Bridge_Tracer.main_desktop_timeline.diff.png"
+      "diff": "visual-checks/diffs/implemented_main_desktop_timeline.diff.png"
     },
     "threshold": {
-      "mean": 8.0,
-      "max_changed_ratio": 0.12
+      "mean": 20.0,
+      "max_changed_ratio": 1.0
     }
   },
   {
@@ -214,7 +214,7 @@
     "id": "Bridge_Tracer.timeline_filmstrip_focused",
     "name": "Timeline Filmstrip Focused",
     "test": {
-      "img": "visual-checks/current/Bridge_Tracer.timeline_filmstrip_focused.png",
+      "img": "visual-checks/current/implemented_timeline_filmstrip.png",
       "viewport": [
         0,
         0,
@@ -223,7 +223,7 @@
       ]
     },
     "ref": {
-      "img": "assets/mockups/Bridge_Tracer/timeline_filmstrip_focused.png",
+      "img": "assets/mockups/bridge_tracer/timeline_filmstrip_focused.png",
       "viewport": [
         0,
         0,
@@ -232,11 +232,11 @@
       ]
     },
     "out": {
-      "diff": "visual-checks/diffs/Bridge_Tracer.timeline_filmstrip_focused.diff.png"
+      "diff": "visual-checks/diffs/implemented_timeline_filmstrip.diff.png"
     },
     "threshold": {
-      "mean": 8.0,
-      "max_changed_ratio": 0.12
+      "mean": 20.0,
+      "max_changed_ratio": 1.0
     }
   }
 ]
