@@ -127,6 +127,74 @@
         "Visual diff entry in visual_diff_config.json.",
         "Regression run of the full visual_diff_config.json."
       ]
+    },
+    "Bridge_Tracer.event_detail_inspector": {
+      "reference_mockup": "assets/mockups/Bridge_Tracer/event_detail_inspector.png",
+      "visual_pass_means": [
+        "The screenshot viewport matches the reference mockup viewport.",
+        "Primary layout geometry matches.",
+        "Spacing, alignment, and component proportions match.",
+        "Colors and contrast match approved mockup intent.",
+        "Important states shown in the mockup are reproduced.",
+        "The visual diff passes thresholds and the diff image has no meaningful regressions."
+      ],
+      "required_tests": [
+        "Functional test for the UI state represented by this mockup.",
+        "Screenshot capture for this feature id.",
+        "Visual diff entry in visual_diff_config.json.",
+        "Regression run of the full visual_diff_config.json."
+      ]
+    },
+    "Bridge_Tracer.filter_recording_sidebar": {
+      "reference_mockup": "assets/mockups/Bridge_Tracer/filter_recording_sidebar.png",
+      "visual_pass_means": [
+        "The screenshot viewport matches the reference mockup viewport.",
+        "Primary layout geometry matches.",
+        "Spacing, alignment, and component proportions match.",
+        "Colors and contrast match approved mockup intent.",
+        "Important states shown in the mockup are reproduced.",
+        "The visual diff passes thresholds and the diff image has no meaningful regressions."
+      ],
+      "required_tests": [
+        "Functional test for the UI state represented by this mockup.",
+        "Screenshot capture for this feature id.",
+        "Visual diff entry in visual_diff_config.json.",
+        "Regression run of the full visual_diff_config.json."
+      ]
+    },
+    "Bridge_Tracer.main_desktop_timeline": {
+      "reference_mockup": "assets/mockups/Bridge_Tracer/main_desktop_timeline.png",
+      "visual_pass_means": [
+        "The screenshot viewport matches the reference mockup viewport.",
+        "Primary layout geometry matches.",
+        "Spacing, alignment, and component proportions match.",
+        "Colors and contrast match approved mockup intent.",
+        "Important states shown in the mockup are reproduced.",
+        "The visual diff passes thresholds and the diff image has no meaningful regressions."
+      ],
+      "required_tests": [
+        "Functional test for the UI state represented by this mockup.",
+        "Screenshot capture for this feature id.",
+        "Visual diff entry in visual_diff_config.json.",
+        "Regression run of the full visual_diff_config.json."
+      ]
+    },
+    "Bridge_Tracer.timeline_filmstrip_focused": {
+      "reference_mockup": "assets/mockups/Bridge_Tracer/timeline_filmstrip_focused.png",
+      "visual_pass_means": [
+        "The screenshot viewport matches the reference mockup viewport.",
+        "Primary layout geometry matches.",
+        "Spacing, alignment, and component proportions match.",
+        "Colors and contrast match approved mockup intent.",
+        "Important states shown in the mockup are reproduced.",
+        "The visual diff passes thresholds and the diff image has no meaningful regressions."
+      ],
+      "required_tests": [
+        "Functional test for the UI state represented by this mockup.",
+        "Screenshot capture for this feature id.",
+        "Visual diff entry in visual_diff_config.json.",
+        "Regression run of the full visual_diff_config.json."
+      ]
     }
   }
 }

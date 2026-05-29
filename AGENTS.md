@@ -59,6 +59,64 @@ No feature is complete until relevant tests pass.
 
 The approved mockups are the visual source of truth.
 
+# Mockup and SVG Asset Rules
+
+Approved mockups are located under each project’s mockup directory:
+
+assets/mockups/
+
+These mockups are the visual source of truth.
+
+If a project has feature-specific mockup sets, use the relevant subdirectory:
+
+assets/mockups/<mockup-set>/
+
+Examples:
+
+assets/mockups/send_ui_polish/
+assets/mockups/bridge_tracer/
+
+Before implementing any visual feature, inspect:
+
+assets/mockups/
+assets/mockups/<mockup-set>/
+assets/mockups/<mockup-set>/svg/
+assets/svg/
+assets/icons/
+
+If SVG source assets exist, use them as the preferred source for icons and extracted UI assets.
+
+SVG source assets may live in:
+
+assets/mockups/<mockup-set>/svg/
+assets/svg/
+assets/icons/
+
+Rules:
+
+1. Before recreating any icon manually, search for a matching SVG source.
+2. If an SVG exists for an icon, use it to generate the app asset.
+3. If a mockup SVG contains multiple UI elements, slice or export the needed icon/component asset from the SVG instead of redrawing it from scratch.
+4. Preserve the visual shape, stroke weight, radius, proportions, and color intent from the SVG.
+5. Generated raster/vector app assets must be deterministic and committed.
+6. Do not overwrite source SVGs.
+7. Place generated app assets in the project’s normal asset/icon location.
+8. If no normal asset/icon location exists, create one consistent with project conventions.
+9. Document which SVG source was used for each generated icon or asset.
+10. If SVG slicing/export requires a script, create a project-local script under scripts/.
+11. Do not use screenshots as source artwork unless no SVG/vector source exists.
+
+SVGs are source assets.
+PNGs are visual references.
+Implementation screenshots are visual test outputs.
+
+Add these completion criteria:
+
+- SVG source assets were inspected before manually recreating icons.
+- Any generated icons/assets derived from SVGs are committed.
+- Asset generation/slicing scripts are committed if used.
+- Source SVGs were not overwritten.
+
 Before UI work, read:
 
 - visual_acceptance_spec.json
@@ -170,7 +228,7 @@ After every meaningful UI change:
 Run from the workspace root:
 
 ```bash
-python scripts/visual_qa/visual_diff.py --config bridge_tracer/visual_diff_config.json
+python scripts/visual_qa/visual_diff.py --config ../Bridge_Tracer/visual_diff_config.json
 ```
 
 The visual diff runner prints clear PASS/FAIL output and writes timestamped Markdown reports under:
@@ -236,7 +294,7 @@ scripts/capture_bridge_tracer.py
 Run these before declaring completion:
 
 ```bash
-python scripts/visual_qa/visual_diff.py --config bridge_tracer/visual_diff_config.json
+python scripts/visual_qa/visual_diff.py --config ../Bridge_Tracer/visual_diff_config.json
 ```
 
 Also run the project’s relevant test commands.
@@ -280,7 +338,10 @@ Do not stop until all are true:
 - No placeholder UI remains unless explicitly intended.
 - No dead/demo-only controls remain unless explicitly intended.
 - Code is clean and maintainable.
-
+- SVG source assets were inspected before manually recreating icons.
+- Any generated icons/assets derived from SVGs are committed.
+- Asset generation/slicing scripts are committed if used.
+- Source SVGs were not overwritten.
 ---
 
 # 10. If blocked
@@ -353,5 +414,6 @@ Do not include long explanations.
 Do not include implementation diary.
 
 <!-- END VISUAL_QA_TDD_RULES -->
+
 
 
