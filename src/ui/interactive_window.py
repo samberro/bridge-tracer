@@ -217,13 +217,26 @@ class InteractiveTracerWindow(QMainWindow):
         self._refresh_controls()
 
     def _on_selection_changed(self) -> None:
-        item = self.event_list.currentItem()
+        # Guard against the signal firing during teardown/GC, after the Python
+        # attributes have been torn down (the C++ tree can still emit).
+        model = getattr(self, "model", None)
+        event_list = getattr(self, "event_list", None)
+        if model is None or event_list is None:
+            return
+        item = event_list.currentItem()
         if item is None:
             return
         event_id = item.data(0, _ID_ROLE)
         if event_id:
-            self.model.select_event(event_id)
+            model.select_event(event_id)
             self._refresh_inspector()
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        try:
+            self.event_list.itemSelectionChanged.disconnect(self._on_selection_changed)
+        except (RuntimeError, TypeError):
+            pass
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------
     # State refresh
