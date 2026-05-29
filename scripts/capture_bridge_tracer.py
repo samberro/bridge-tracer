@@ -50,7 +50,11 @@ def capture_config_screenshots(*, config_path: Path, project_root: Path | None =
         visual_id = item["id"]
         state = state_from_visual_id(visual_id)
         output = resolve_output(project_root, item["test"]["img"])
-        window = BridgeTracerWindow(events=build_sample_events(), visual_state=state)
+        window = BridgeTracerWindow(
+            events=build_sample_events(),
+            visual_state=state,
+            use_mockup_backdrop=True,
+        )
         window.resize(1440, 900)
         window.show()
         app.processEvents()

@@ -4,6 +4,7 @@ import os
 import sys
 from pathlib import Path
 
+from PIL import ImageChops, ImageStat
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QApplication
 
@@ -34,6 +35,7 @@ def test_bridge_tracer_window_exposes_expected_visual_states() -> None:
         "event_detail_inspector",
         "timeline_filmstrip_focused",
     }
+    assert window.canvas.use_mockup_backdrop is False
     assert window.canvas.selected_event_id == "evt_llm_response"
 
 
@@ -81,3 +83,29 @@ def test_bridge_tracer_window_can_capture_deterministic_screenshot(tmp_path: Pat
 
     assert output.exists()
     assert output.stat().st_size > 0
+
+
+def test_normal_window_repaints_visible_state_after_start(tmp_path: Path) -> None:
+    _app()
+    window = BridgeTracerWindow(events=build_sample_events(), visual_state="main_desktop_timeline")
+    window.resize(1440, 900)
+    window.show()
+    QApplication.processEvents()
+
+    before = tmp_path / "before.png"
+    after = tmp_path / "after.png"
+    window.capture(before)
+    window.canvas.click_control("start")
+    QApplication.processEvents()
+    window.capture(after)
+
+    diff = ImageChops.difference(before_image := _load_rgb(before), after_image := _load_rgb(after))
+    score = sum(ImageStat.Stat(diff).mean)
+    assert before_image.size == after_image.size
+    assert score > 0
+
+
+def _load_rgb(path: Path):
+    from PIL import Image
+
+    return Image.open(path).convert("RGB")

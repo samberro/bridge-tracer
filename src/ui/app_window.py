@@ -26,7 +26,8 @@ MOCKUP_DIR = PROJECT_ROOT / "assets" / "mockups" / "bridge_tracer"
 
 class BridgeTracerWindow(QMainWindow):
     def __init__(self, *, events: list[EventModel] | None = None,
-                 visual_state: str = "main_desktop_timeline") -> None:
+                 visual_state: str = "main_desktop_timeline",
+                 use_mockup_backdrop: bool = False) -> None:
         super().__init__()
         self.setObjectName("bridgeTracerWindow")
         self.setWindowTitle("Bridge Timeline Debugger")
@@ -36,6 +37,7 @@ class BridgeTracerWindow(QMainWindow):
             controller=self.controller,
             events=events or build_sample_events(),
             visual_state=visual_state,
+            use_mockup_backdrop=use_mockup_backdrop,
         )
         self.setCentralWidget(self.canvas)
         self.resize(1440, 900)
@@ -57,12 +59,14 @@ class BridgeTracerWindow(QMainWindow):
 
 class BridgeTracerCanvas(QWidget):
     def __init__(self, *, controller: BridgeTracerController, events: list[EventModel],
-                 visual_state: str) -> None:
+                 visual_state: str, use_mockup_backdrop: bool = False) -> None:
         super().__init__()
         self.controller = controller
         self.model = TimelineViewModel(events, selected_event_id="evt_llm_response")
         self.visual_state = visual_state
+        self.use_mockup_backdrop = use_mockup_backdrop
         self.selected_event_id = self.model.selected_event_id
+        self.last_action = "Ready"
         self._controls: dict[str, QRect] = {}
         self._events: dict[str, QRect] = {}
         self.setMinimumSize(1440, 900)
@@ -78,9 +82,18 @@ class BridgeTracerCanvas(QWidget):
         if control == "start":
             if self.controller.status.recording_state == RecordingState.IDLE:
                 self.controller.start_recording()
+                self.last_action = "Recording started"
         elif control == "stop":
             if self.controller.status.recording_state == RecordingState.RECORDING:
                 self.controller.stop_recording()
+                self.last_action = "Recording stopped"
+        elif control == "connect":
+            self.controller.connect("http://localhost:8080", "dev-token")
+            self.last_action = "Connected"
+        elif control == "save":
+            self.last_action = "Save ready"
+        elif control == "load":
+            self.last_action = "Load ready"
         self.update()
 
     def event_rect(self, event_id: str) -> QRect | None:
@@ -102,6 +115,7 @@ class BridgeTracerCanvas(QWidget):
             if rect.contains(pos):
                 self.selected_event_id = event_id
                 self.model.select_event(event_id)
+                self.last_action = f"Selected {self.current_detail().title}"
                 self.update()
                 return
         for control, rect in self._controls.items():
@@ -115,7 +129,7 @@ class BridgeTracerCanvas(QWidget):
         painter.fillRect(self.rect(), QColor(BACKGROUND))
         self._controls.clear()
         self._events.clear()
-        if self._draw_approved_backdrop(painter):
+        if self.use_mockup_backdrop and self._draw_approved_backdrop(painter):
             self._register_state_rects()
             return
         self._draw_toolbar(painter)
@@ -260,10 +274,15 @@ class BridgeTracerCanvas(QWidget):
             "timeline_filmstrip_focused": " - Timeline Filmstrip",
         }.get(self.visual_state, "")
         self._text(painter, 24, 40, title + suffix, size=18, bold=True)
+        state = self.controller.status.recording_state
+        start_fill = "#123223" if state != RecordingState.RECORDING else "#203048"
+        start_border = "#1f8b54" if state != RecordingState.RECORDING else "#40516b"
+        stop_fill = "#35161d" if state == RecordingState.RECORDING else "#1c2433"
+        stop_border = "#a6404d" if state == RecordingState.RECORDING else "#40516b"
         specs = [
             ("connect", QRect(330, 18, 92, 31), "Connect", "#101b2d", "#31435f"),
-            ("start", QRect(432, 18, 132, 31), "Start Recording", "#123223", "#1f8b54"),
-            ("stop", QRect(574, 18, 132, 31), "Stop Recording", "#35161d", "#a6404d"),
+            ("start", QRect(432, 18, 132, 31), "Recording" if state == RecordingState.RECORDING else "Start Recording", start_fill, start_border),
+            ("stop", QRect(574, 18, 132, 31), "Stop Recording", stop_fill, stop_border),
             ("save", QRect(716, 18, 92, 31), "Save", "#101b2d", "#31435f"),
             ("load", QRect(818, 18, 92, 31), "Load", "#101b2d", "#31435f"),
         ]
@@ -271,8 +290,10 @@ class BridgeTracerCanvas(QWidget):
             self._controls[key] = rect
             self._pill(painter, rect, label, color=fill, border=border, bold=True)
         status = QRect(1158, 18, 250, 31)
-        self._pill(painter, status, self.controller.status.label, color="#0d1728", border="#31435f", bold=True)
-        self._dot(painter, 1174, 27, "#22c55e", 12)
+        status_text = f"{state.value} - {self.last_action}"
+        self._pill(painter, status, status_text, color="#0d1728", border="#31435f", bold=True)
+        dot_color = "#22c55e" if state == RecordingState.RECORDING else "#38bdf8"
+        self._dot(painter, 1174, 27, dot_color, 12)
 
     def _draw_main_state(self, painter: QPainter) -> None:
         self._panel(painter, QRect(16, 82, 276, 743))

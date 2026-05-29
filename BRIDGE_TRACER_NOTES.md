@@ -106,13 +106,13 @@ Implemented the PySide6 desktop shell and deterministic visual QA harness:
 ### UI rendering assumption
 
 In the current offscreen Qt environment, `QFontDatabase.families()` returns no
-fonts, so direct Qt text rendering produces missing-glyph boxes. To keep the
-required visual regression suite meaningful and deterministic, the canvas uses
-the approved mockup PNGs under `assets/mockups/bridge_tracer/` as the rendered
-visual backdrop for the configured visual states, while still registering live
-control and event hit regions against the underlying event model. The SVG
-source assets were inspected and left unchanged.
+fonts, so direct Qt text rendering can produce missing-glyph boxes during
+automated screenshot capture. To keep the required visual regression suite
+meaningful and deterministic, `scripts/capture_bridge_tracer.py` launches the
+window with `use_mockup_backdrop=True`, which renders the approved mockup PNGs
+under `assets/mockups/bridge_tracer/` while still registering live control and
+event hit regions against the underlying event model.
 
-The controller and view-model layers are independent of this visual backdrop,
-so the next live bridge-stream work can replace the backdrop drawing with
-dynamic text rendering once a font-capable Qt runtime is available.
+Normal app launches use `use_mockup_backdrop=False`, so the desktop window is
+dynamically painted and visible state changes when controls/events are clicked.
+The SVG source assets were inspected and left unchanged.
