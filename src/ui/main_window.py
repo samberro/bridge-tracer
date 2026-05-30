@@ -42,6 +42,7 @@ from src.ui.timeline_view import TimelineView
 from src.ui.render_rules import (
     RenderRule,
     evaluate_expression,
+    event_payload,
     get_rules,
     pinned_values_for_event,
     reset_rules,
@@ -320,8 +321,24 @@ class MainWindow(QMainWindow):
         # Toolbar
         self._build_toolbar()
 
+        # Root workspace is the only horizontal splitter directly under the
+        # toolbar. The inspector is a sibling of the whole left work surface,
+        # so the filter panel never pushes the right inspector down.
+        self.workspace_splitter = QSplitter(Qt.Horizontal)
+        self.workspace_splitter.setObjectName("workspace_splitter")
+        self.workspace_splitter.setChildrenCollapsible(False)
+        self.root_layout.addWidget(self.workspace_splitter, 1)
+
+        # Left work area: filters stacked above the main surface only.
+        self.left_work_area = QWidget()
+        self.left_work_layout = QVBoxLayout(self.left_work_area)
+        self.left_work_layout.setContentsMargins(0, 0, 0, 0)
+        self.left_work_layout.setSpacing(10)
+        self.workspace_splitter.addWidget(self.left_work_area)
+
         # Transient filter panel. It animates open/closed and fully disappears
-        # when collapsed, so it never leaves a dead strip in the layout.
+        # when collapsed. Since it lives inside left_work_area, only the center
+        # surface moves down; the right inspector remains full height.
         self.filter_panel = QFrame()
         self.filter_panel.setObjectName("sidebar_frame")
         self._build_filter_panel()
@@ -330,15 +347,17 @@ class MainWindow(QMainWindow):
         self.filter_panel.setGraphicsEffect(self._filter_opacity)
         self.filter_panel.setMaximumHeight(0)
         self.filter_panel.hide()
-        self.root_layout.addWidget(self.filter_panel)
+        self.left_work_layout.addWidget(self.filter_panel)
 
-        # Main workspace is horizontally resizable. The right inspector width is
-        # user-adjustable instead of fixed, and the sidebar can still be hidden
-        # by visual state without disturbing the timeline.
-        self.workspace_splitter = QSplitter(Qt.Horizontal)
-        self.workspace_splitter.setObjectName("workspace_splitter")
-        self.workspace_splitter.setChildrenCollapsible(False)
-        self.root_layout.addWidget(self.workspace_splitter, 1)
+        # The main surface is horizontally resizable within the left work area.
+        # It owns the optional sidebar plus the center timeline/list area.
+        self.surface_splitter = QSplitter(Qt.Horizontal)
+        self.surface_splitter.setObjectName("surface_splitter")
+        self.surface_splitter.setChildrenCollapsible(False)
+        self.left_work_layout.addWidget(self.surface_splitter, 1)
+
+        # Backwards-compatible alias used by tests/older code.
+        self.center_splitter = self.surface_splitter
 
         # Left Sidebar Panel
         self.sidebar_widget = QFrame()
@@ -346,14 +365,14 @@ class MainWindow(QMainWindow):
         self.sidebar_widget.setMinimumWidth(220)
         self.sidebar_widget.setMaximumWidth(420)
         self._build_sidebar()
-        self.workspace_splitter.addWidget(self.sidebar_widget)
+        self.surface_splitter.addWidget(self.sidebar_widget)
 
         # Center Container
         self.center_container = QWidget()
         self.center_layout = QVBoxLayout(self.center_container)
         self.center_layout.setContentsMargins(0, 0, 0, 0)
         self.center_layout.setSpacing(10)
-        self.workspace_splitter.addWidget(self.center_container)
+        self.surface_splitter.addWidget(self.center_container)
 
         # Center tabs (Timeline + List view)
         self.center_tabs = QTabWidget()
@@ -391,10 +410,16 @@ class MainWindow(QMainWindow):
         self.inspector_widget.setMaximumWidth(900)
         self._build_inspector()
         self.workspace_splitter.addWidget(self.inspector_widget)
-        self.workspace_splitter.setStretchFactor(0, 0)
-        self.workspace_splitter.setStretchFactor(1, 1)
-        self.workspace_splitter.setStretchFactor(2, 0)
-        self.workspace_splitter.setSizes([0, 930, 420])
+
+        # Root splitter: left work surface + full-height inspector.
+        self.workspace_splitter.setStretchFactor(0, 1)
+        self.workspace_splitter.setStretchFactor(1, 0)
+        self.workspace_splitter.setSizes([980, 420])
+
+        # Surface splitter: optional sidebar + center timeline/list.
+        self.surface_splitter.setStretchFactor(0, 0)
+        self.surface_splitter.setStretchFactor(1, 1)
+        self.surface_splitter.setSizes([0, 980])
 
         # Bottom Collapsible Logs Panel
         self.logs_panel = QFrame()
@@ -1039,6 +1064,8 @@ class MainWindow(QMainWindow):
         self._refresh_controls()
 
     def _on_start(self) -> None:
+        if not self.controller.status.connected:
+            self._on_connect()
         self.controller.start_recording()
         self._refresh_controls()
         self._poll_timer.start()
@@ -1235,7 +1262,7 @@ class MainWindow(QMainWindow):
             pinned_root.addChild(item)
         pinned_root.setExpanded(True)
 
-        root_payload = event.model_dump(mode="json")
+        root_payload = event_payload(event)
         obj_root = QTreeWidgetItem(["object", event.type])
         self.object_tree.addTopLevelItem(obj_root)
         self._add_object_tree_children(obj_root, root_payload, "$")
@@ -1250,6 +1277,14 @@ class MainWindow(QMainWindow):
                 parent.addChild(item)
                 if isinstance(child, (dict, list)):
                     self._add_object_tree_children(item, child, child_path)
+                if isinstance(child, str):
+                    parsed = self._try_parse_json_string(child)
+                    if parsed is not None:
+                        parsed_item = QTreeWidgetItem(["parsed_json", self._tree_value_preview(parsed)])
+                        parsed_item.setData(0, _ID_ROLE, f"{child_path}.parsed_json")
+                        item.addChild(parsed_item)
+                        self._add_object_tree_children(parsed_item, parsed, child_path)
+                        item.setExpanded(True)
         elif isinstance(value, list):
             for index, child in enumerate(value):
                 child_path = f"{path}[{index}]"
@@ -1258,6 +1293,16 @@ class MainWindow(QMainWindow):
                 parent.addChild(item)
                 if isinstance(child, (dict, list)):
                     self._add_object_tree_children(item, child, child_path)
+
+    def _try_parse_json_string(self, value: str) -> Any | None:
+        text = value.strip()
+        if len(text) < 2 or text[0] not in "[{":
+            return None
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return None
+        return parsed if isinstance(parsed, (dict, list)) else None
 
     def _tree_value_preview(self, value: Any) -> str:
         if value is None:
@@ -1292,39 +1337,19 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         if getattr(self, "_poll_timer", None) is not None:
             self._poll_timer.stop()
-        if hasattr(self, "controller") and self.controller is not None:
+        if getattr(self, "_timeline_rebuild_timer", None) is not None:
+            self._timeline_rebuild_timer.stop()
+        if getattr(self, "controller", None) is not None:
             try:
                 self.controller.disconnect()
             except Exception:
                 pass
-        if hasattr(self, "timeline_view") and self.timeline_view is not None:
-            try:
-                self.timeline_view.items_map.clear()
-                self.timeline_view.connectors.clear()
-            except Exception:
-                pass
         super().closeEvent(event)
 
-    # ------------------------------------------------------------------
-    # Path Providers
-    # ------------------------------------------------------------------
     def _ask_save_path(self) -> Optional[Path]:
-        name, _ = QFileDialog.getSaveFileName(self, "Save recording", "recording.json",
-                                              "Recordings (*.json)")
-        return Path(name) if name else None
+        path, _ = QFileDialog.getSaveFileName(self, "Save Recording", "recording.json", "JSON Files (*.json)")
+        return Path(path) if path else None
 
     def _ask_open_path(self) -> Optional[Path]:
-        name, _ = QFileDialog.getOpenFileName(self, "Load recording", "",
-                                              "Recordings (*.json)")
-        return Path(name) if name else None
-
-    # Screenshot helper
-    def capture(self, path: Path) -> Path:
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.repaint()
-        # Ensure offscreen Qt handles events
-        QApplication.processEvents()
-        pixmap = self.grab()
-        pixmap.save(str(path))
-        return path
+        path, _ = QFileDialog.getOpenFileName(self, "Load Recording", "", "JSON Files (*.json)")
+        return Path(path) if path else None
