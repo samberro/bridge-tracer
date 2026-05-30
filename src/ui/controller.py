@@ -205,6 +205,9 @@ class BridgeTracerController(QObject):
     def _on_stream_event(self, raw_evt: dict) -> None:
         if self._recorder.state != RecordingState.RECORDING:
             return
+        event_id = self._raw_event_id(raw_evt)
+        if event_id and event_id in self._seen_ids:
+            return
         event = self._recorder.feed(raw_evt)
         if event is not None:
             self._seen_ids.add(event.id)
@@ -222,7 +225,43 @@ class BridgeTracerController(QObject):
             except Exception:
                 pass
 
+    def _raw_event_id(self, raw: Any) -> str | None:
+        if isinstance(raw, EventModel):
+            return raw.id
+        if isinstance(raw, dict):
+            for key in ("id", "event_id", "uuid"):
+                value = raw.get(key)
+                if value:
+                    return str(value)
+        return None
+
+    def _mark_existing_bridge_events_seen(self, *, limit: int | None = 500) -> None:
+        """Mark the bridge's current memory buffer as already seen.
+
+        Recording should start at the moment the user presses Record. The bridge
+        /logs endpoint returns a tail buffer, so the first poll would otherwise
+        backfill old events. We intentionally snapshot IDs before switching the
+        recorder to RECORDING, then ignore those IDs during polling/streaming.
+        """
+        if self._client is None:
+            return
+        try:
+            raw_events = self._client.fetch_logs(limit=limit)
+        except Exception:
+            return
+        for raw in raw_events:
+            event_id = self._raw_event_id(raw)
+            if event_id:
+                self._seen_ids.add(event_id)
+                continue
+            mapped = map_log_event(raw) if isinstance(raw, dict) else None
+            if mapped is not None:
+                self._seen_ids.add(mapped.id)
+
     def start_recording(self) -> None:
+        if self._client is None:
+            self.connect(os.environ.get("AI_BRIDGE_URL", "http://127.0.0.1:8765"), _env_auth_token())
+
         if self._recorder.state == RecordingState.STOPPED:
             self._recorder = Recorder(
                 on_state_change=self._on_recording_state_change,
@@ -230,8 +269,9 @@ class BridgeTracerController(QObject):
             )
         else:
             self._recorder._on_stop_subscriptions = self._stop_stream_worker
-            
+
         self._seen_ids = set()
+        self._mark_existing_bridge_events_seen()
         self._recorder.start()
 
         if self.trace_available():
@@ -264,6 +304,9 @@ class BridgeTracerController(QObject):
         raw_events = self._client.fetch_logs(limit=limit)
         new_count = 0
         for raw in raw_events:
+            event_id = self._raw_event_id(raw)
+            if event_id and event_id in self._seen_ids:
+                continue
             event = map_log_event(raw) if isinstance(raw, dict) else None
             if event is None or event.id in self._seen_ids:
                 continue
@@ -300,4 +343,3 @@ class BridgeTracerController(QObject):
             safe_description=self.status.safe_description,
             recording_state=target,
         )
-
