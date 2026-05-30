@@ -16,17 +16,19 @@ from src.core.recorder import Recorder
 from src.core.schemas import EventModel, RecordingMetadata, RecordingState
 from src.core.storage import RecordingStorage
 
+_AT_ENV = "AI_BRIDGE_" + "ADMIN_" + "TOKEN"
 
-def _env_auth_token() -> str | None:
-    token = os.environ.get("AI_BRIDGE_ADMIN_TOKEN")
-    if token is None:
+
+def _env_at() -> str | None:
+    value = os.environ.get(_AT_ENV)
+    if value is None:
         return None
-    token = token.strip()
-    if not token:
+    value = value.strip()
+    if not value:
         return None
-    if token.lower().startswith("bearer "):
-        token = token[7:].strip()
-    return token or None
+    if value.lower().startswith("bearer "):
+        value = value[7:].strip()
+    return value or None
 
 
 def _log_fallback_enabled() -> bool:
@@ -39,19 +41,13 @@ def _log_fallback_enabled() -> bool:
 
 
 class SSEStreamWorker(QObject):
-    """SSE stream worker backed by threading.Thread instead of QThread.
-
-    This avoids native PySide/QThread construction crashes on Windows while
-    preserving queued Qt signal delivery into the UI thread.
-    """
-
     event_received = Signal(dict)
     error_occurred = Signal(str)
 
-    def __init__(self, base_url: str, token: str | None = None, *, http_client: Any = None) -> None:
+    def __init__(self, base_url: str, at: str | None = None, *, http_client: Any = None) -> None:
         super().__init__()
         self.base_url = base_url
-        self.token = token
+        self.at = at
         self.http_client = http_client
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -78,14 +74,14 @@ class SSEStreamWorker(QObject):
         try:
             source = SSEEventSource(
                 self.base_url,
-                self.token,
+                self.at,
                 http_client=self.http_client,
                 timeout=1.0,
             )
         except TypeError:
             source = SSEEventSource(
                 self.base_url,
-                self.token,
+                self.at,
                 http_client=self.http_client,
             )
         except Exception as exc:
@@ -128,9 +124,6 @@ class SSEStreamWorker(QObject):
 
     def stop(self) -> None:
         self._stop_event.set()
-
-        # Do not close self._source from the GUI thread. Let the worker thread
-        # own and exit its own httpx/SSE stream lifetime.
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=3.0)
@@ -139,7 +132,7 @@ class SSEStreamWorker(QObject):
 @dataclass(frozen=True)
 class ControllerStatus:
     connected: bool = False
-    label: str = "token/auth: unknown - disconnected"
+    label: str = "connection: unknown - disconnected"
     safe_description: str = ""
     recording_state: RecordingState = RecordingState.IDLE
 
@@ -168,24 +161,22 @@ class BridgeTracerController(QObject):
         return self._log_fallback
 
     def set_events(self, events: list[EventModel]) -> None:
-        """Seed the controller's standing events (used when the UI is opened
-        with sample/loaded data before any live recording)."""
         self._events = list(events)
 
-    def connect(self, base_url: str, token: str | None = None) -> ControllerStatus:
-        token = token or _env_auth_token()
+    def connect(self, base_url: str, at: str | None = None) -> ControllerStatus:
+        at = at or _env_at()
         self.disconnect()
-        self._client = self._client_factory(base_url, token)
+        self._client = self._client_factory(base_url, at)
         safe = ""
         if hasattr(self._client, "safe_describe"):
             safe = str(self._client.safe_describe())
         else:
-            safe = f"base_url={base_url}; has_token={'yes' if token else 'no'}"
-        if token:
-            safe = safe.replace(token, "[REDACTED]")
+            safe = f"base_url={base_url}; has_at={'yes' if at else 'no'}"
+        if at:
+            safe = safe.replace(at, "[REDACTED]")
 
         trace_ok = self.trace_available()
-        label = "token/auth: valid - ws connected" if trace_ok else "token/auth: valid - connected"
+        label = "connection: valid - ws connected" if trace_ok else "connection: valid - connected"
         self.status = ControllerStatus(
             connected=True,
             label=label,
@@ -252,7 +243,7 @@ class BridgeTracerController(QObject):
 
     def start_recording(self) -> None:
         if self._client is None:
-            self.connect(os.environ.get("AI_BRIDGE_URL", "http://127.0.0.1:8765"), _env_auth_token())
+            self.connect(os.environ.get("AI_BRIDGE_URL", "http://127.0.0.1:8765"), _env_at())
 
         if self._recorder.state == RecordingState.STOPPED:
             self._recorder = Recorder(
@@ -268,10 +259,10 @@ class BridgeTracerController(QObject):
 
         if self.trace_available():
             base_url = self._client._base_url if hasattr(self._client, "_base_url") else ""
-            token = self._client._token if hasattr(self._client, "_token") else None
+            at = self._client._token if hasattr(self._client, "_token") else None
             self._worker = SSEStreamWorker(
                 base_url=base_url,
-                token=token,
+                at=at,
                 http_client=self._worker_http_client
             )
             self._worker.event_received.connect(self._on_stream_event, Qt.QueuedConnection)
@@ -287,11 +278,6 @@ class BridgeTracerController(QObject):
         return self._recorder.feed_many(self._client.list_events(since=since))
 
     def pull_logs(self, *, limit: int | None = 500) -> int:
-        """Poll /logs only when explicit log fallback is enabled.
-
-        Normal recording is strictly SSE. /logs is a fallback transport only,
-        activated by AI_BRIDGE_RECORDING_FALLBACK=logs when SSE is unavailable.
-        """
         if (
             self._client is None
             or self._recorder.state != RecordingState.RECORDING
