@@ -54,7 +54,49 @@ def reset_rules() -> None:
 
 
 def event_payload(event: EventModel) -> dict[str, Any]:
-    return event.model_dump(mode="json")
+    """Return an event payload with embedded JSON strings expanded.
+
+    Bridge logs often place the real request/response object inside a string
+    field such as details.payload.text. The UI/evaluator should treat that as
+    navigable data, not as an opaque string. Original string fields are kept,
+    and parsed siblings are added with a *_json suffix. Path lookup also auto
+    descends into JSON strings, so both of these work:
+
+        details.payload.text.messages[-1].content
+        details.payload.text_json.messages[-1].content
+    """
+    return _expand_json_strings(event.model_dump(mode="json"))
+
+
+def try_parse_json_string(value: Any) -> Any:
+    if not isinstance(value, str):
+        return _MISSING
+    text = value.strip()
+    if len(text) < 2 or text[0] not in "[{":
+        return _MISSING
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return _MISSING
+    if isinstance(parsed, (dict, list)):
+        return _expand_json_strings(parsed)
+    return _MISSING
+
+
+def _expand_json_strings(value: Any, *, _depth: int = 0) -> Any:
+    if _depth > 8:
+        return value
+    if isinstance(value, dict):
+        expanded: dict[str, Any] = {}
+        for key, child in value.items():
+            expanded[key] = _expand_json_strings(child, _depth=_depth + 1)
+            parsed = try_parse_json_string(child)
+            if parsed is not _MISSING:
+                expanded[f"{key}_json"] = parsed
+        return expanded
+    if isinstance(value, list):
+        return [_expand_json_strings(child, _depth=_depth + 1) for child in value]
+    return value
 
 
 def preview_for_event(event: EventModel, *, max_chars: int = 90) -> str:
@@ -94,6 +136,8 @@ def fallback_preview(event: EventModel, *, max_chars: int = 90) -> str:
         "details.output",
         "details.response",
         "details.content",
+        "details.payload.text.messages[-1].content",
+        "details.payload.text",
         "details.status_code",
         "summary",
         "type",
@@ -191,6 +235,14 @@ def path(obj: Any, path_expr: str, default: Any = _MISSING) -> Any:
     for token in _parse_path(path_expr):
         if cur is None:
             return default
+        if isinstance(cur, str):
+            parsed = try_parse_json_string(cur)
+            if parsed is not _MISSING:
+                cur = parsed
+            elif token == "parsed_json":
+                return default
+        if token == "parsed_json" and not isinstance(cur, str):
+            continue
         if isinstance(token, int):
             if not isinstance(cur, (list, tuple)):
                 return default
@@ -240,6 +292,8 @@ def _last_message(obj: dict[str, Any]) -> Any:
         path(obj, "details.body.messages"),
         path(obj, "details.request.messages"),
         path(obj, "details.payload.messages"),
+        path(obj, "details.payload.text.messages"),
+        path(obj, "details.payload.text_json.messages"),
         path(obj, "details.input.messages"),
     ]
     for messages in candidates:
