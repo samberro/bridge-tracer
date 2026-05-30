@@ -51,7 +51,7 @@ from src.ui.view_models import EventDetail, TimelineViewModel
 
 
 def _env_auth_token() -> str:
-    token = os.environ.get("AI_BRIDGE_AUTH_TOKEN", "").strip()
+    token = os.environ.get("AI_BRIDGE_ADMIN_TOKEN", "").strip()
     if token.lower().startswith("bearer "):
         token = token[7:].strip()
     return token
@@ -443,7 +443,7 @@ class MainWindow(QMainWindow):
         self.toolbar_layout.addWidget(self.url_edit)
 
         self.token_edit = QLineEdit(_env_auth_token())
-        self.token_edit.setPlaceholderText("Bearer token or AI_BRIDGE_AUTH_TOKEN")
+        self.token_edit.setPlaceholderText("Bearer token or AI_BRIDGE_ADMIN_TOKEN")
         self.token_edit.setEchoMode(QLineEdit.Password)
         self.token_edit.setFixedWidth(170)
         self.toolbar_layout.addWidget(self.token_edit)

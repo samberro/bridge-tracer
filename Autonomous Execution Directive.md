@@ -3,16 +3,6 @@ You are an autonomous implementation agent.
 
 Execute the project's plans from start to finish:
 
-You are operating from workspace root:
-
-C:\Users\sambe\Documents\PowerShell
-
-The projects are separate repos:
-
-chat_app/  
-bridge_tracer/  
-ai_bridge/
-
 Do not merge repos.  
 Do not move project code between repos.  
 Do not ask questions.  
@@ -26,7 +16,7 @@ Do not modify the main working tree directly.
 
 For each project repo, create a dedicated worktree from master/main.
 
-Use the repo’s default primary branch. Prefer `master` if it exists, otherwise use `main`.
+Use the repo’s default primary branch. Prefer `master` if it exists, otherwise use `main`.
 
 Before starting each plan:
 
@@ -187,7 +177,7 @@ The SEND UI Polish work should use the approved mockups under:
 
 If mockups are missing, use the importer:
 
-python scripts/visual_qa/import_mockups.py --project {{project_name}} --zip path/to/{{project_name}}_assets.zip --mockup-set send_ui_polish --feature-prefix send_ui
+python scripts/visual_qa/import_mockups.py --project {{project_name}} --zip path/to/{{project_name}}_assets.zip --mockup-set {{worktree-name}}
 
 If assets already exist, still ensure visual_diff_config.json and visual_acceptance_spec.json contain entries for them.
 
