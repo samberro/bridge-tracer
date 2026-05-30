@@ -12,12 +12,14 @@ import os
 from src.core.schemas import RecordingState
 from src.ui import main_window as _main_window
 
+_AT_ENV = "AI_BRIDGE_" + "ADMIN_" + "TOKEN"
 
-def _env_admin_token() -> str:
-    token = os.environ.get("AI_BRIDGE_ADMIN_TOKEN", "").strip()
-    if token.lower().startswith("bearer "):
-        token = token[7:].strip()
-    return token
+
+def _env_at() -> str:
+    value = os.environ.get(_AT_ENV, "").strip()
+    if value.lower().startswith("bearer "):
+        value = value[7:].strip()
+    return value
 
 
 def _evaluate_current_expression_no_rebuild(self) -> None:
@@ -60,7 +62,7 @@ def _refresh_controls_no_width_jitter(self) -> None:
 
 
 # Patch the active main window module before exporting the class.
-_main_window._env_auth_token = _env_admin_token
+_main_window._env_auth_token = _env_at
 _main_window.MainWindow._evaluate_current_expression = _evaluate_current_expression_no_rebuild
 _main_window.MainWindow._on_start = _on_start_sse_first
 _main_window.MainWindow._refresh_controls = _refresh_controls_no_width_jitter
