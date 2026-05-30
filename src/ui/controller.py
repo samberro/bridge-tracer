@@ -18,7 +18,7 @@ from src.core.storage import RecordingStorage
 
 
 def _env_auth_token() -> str | None:
-    token = os.environ.get("AI_BRIDGE_AUTH_TOKEN")
+    token = os.environ.get("AI_BRIDGE_ADMIN_TOKEN")
     if token is None:
         return None
     token = token.strip()
