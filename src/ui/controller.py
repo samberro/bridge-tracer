@@ -29,6 +29,15 @@ def _env_auth_token() -> str | None:
     return token or None
 
 
+def _log_fallback_enabled() -> bool:
+    return os.environ.get("AI_BRIDGE_RECORDING_FALLBACK", "").strip().casefold() in {
+        "log",
+        "logs",
+        "poll",
+        "poll_logs",
+    }
+
+
 class SSEStreamWorker(QObject):
     """SSE stream worker backed by threading.Thread instead of QThread.
 
@@ -146,12 +155,17 @@ class BridgeTracerController(QObject):
         self.status = ControllerStatus()
         self._worker: SSEStreamWorker | None = None
         self._worker_http_client = None
+        self._log_fallback = False
 
     @property
     def events(self) -> list[EventModel]:
         if self._recorder.events:
             return self._recorder.sorted_events()
         return list(self._events)
+
+    @property
+    def is_log_fallback(self) -> bool:
+        return self._log_fallback
 
     def set_events(self, events: list[EventModel]) -> None:
         """Seed the controller's standing events (used when the UI is opened
@@ -182,6 +196,7 @@ class BridgeTracerController(QObject):
 
     def disconnect(self) -> None:
         self._stop_stream_worker()
+        self._log_fallback = False
         if self._client is not None and hasattr(self._client, "close"):
             self._client.close()
         self._client = None
@@ -235,29 +250,6 @@ class BridgeTracerController(QObject):
                     return str(value)
         return None
 
-    def _mark_existing_bridge_events_seen(self, *, limit: int | None = 500) -> None:
-        """Mark the bridge's current memory buffer as already seen.
-
-        Recording should start at the moment the user presses Record. The bridge
-        /logs endpoint returns a tail buffer, so the first poll would otherwise
-        backfill old events. We intentionally snapshot IDs before switching the
-        recorder to RECORDING, then ignore those IDs during polling/streaming.
-        """
-        if self._client is None:
-            return
-        try:
-            raw_events = self._client.fetch_logs(limit=limit)
-        except Exception:
-            return
-        for raw in raw_events:
-            event_id = self._raw_event_id(raw)
-            if event_id:
-                self._seen_ids.add(event_id)
-                continue
-            mapped = map_log_event(raw) if isinstance(raw, dict) else None
-            if mapped is not None:
-                self._seen_ids.add(mapped.id)
-
     def start_recording(self) -> None:
         if self._client is None:
             self.connect(os.environ.get("AI_BRIDGE_URL", "http://127.0.0.1:8765"), _env_auth_token())
@@ -271,7 +263,7 @@ class BridgeTracerController(QObject):
             self._recorder._on_stop_subscriptions = self._stop_stream_worker
 
         self._seen_ids = set()
-        self._mark_existing_bridge_events_seen()
+        self._log_fallback = False
         self._recorder.start()
 
         if self.trace_available():
@@ -284,6 +276,8 @@ class BridgeTracerController(QObject):
             )
             self._worker.event_received.connect(self._on_stream_event, Qt.QueuedConnection)
             self._worker.start()
+        elif _log_fallback_enabled():
+            self._log_fallback = True
 
         self._on_recording_state_change(RecordingState.IDLE, self._recorder.state)
 
@@ -293,13 +287,16 @@ class BridgeTracerController(QObject):
         return self._recorder.feed_many(self._client.list_events(since=since))
 
     def pull_logs(self, *, limit: int | None = 500) -> int:
-        """Poll the bridge's /logs endpoint and feed NEW events into the
-        recorder. Returns the count of newly recorded events.
+        """Poll /logs only when explicit log fallback is enabled.
 
-        De-dupes by event id (each poll returns the last N logs), and only
-        records while RECORDING so polling outside a session is a no-op.
+        Normal recording is strictly SSE. /logs is a fallback transport only,
+        activated by AI_BRIDGE_RECORDING_FALLBACK=logs when SSE is unavailable.
         """
-        if self._client is None or self._recorder.state != RecordingState.RECORDING:
+        if (
+            self._client is None
+            or self._recorder.state != RecordingState.RECORDING
+            or not self._log_fallback
+        ):
             return 0
         raw_events = self._client.fetch_logs(limit=limit)
         new_count = 0
@@ -318,6 +315,7 @@ class BridgeTracerController(QObject):
     def stop_recording(self) -> RecordingMetadata:
         metadata = self._recorder.stop()
         self._events = self._recorder.sorted_events()
+        self._log_fallback = False
         self._on_recording_state_change(RecordingState.STOPPING, self._recorder.state)
         return metadata
 
