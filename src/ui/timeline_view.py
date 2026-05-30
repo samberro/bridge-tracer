@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
-from typing import Optional
+from collections import defaultdict
+from datetime import datetime
+from typing import Iterable
 
-from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsObject,
@@ -14,14 +16,31 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.core.schemas import EventCategory, EventModel
-from src.ui.theme import BACKGROUND, BORDER, CATEGORY_COLORS, LEVEL_COLORS, SURFACE, TEXT, TEXT_DIM, TEXT_MUTED
+from src.core.schemas import EventCategory, EventLevel, EventModel
+from src.ui.theme import BACKGROUND, BORDER, CATEGORY_COLORS, SURFACE, TEXT, TEXT_DIM, TEXT_MUTED
+from src.ui.render_rules import preview_for_event, title_for_event
+
+
+LANE_ORDER: tuple[EventCategory, ...] = (
+    EventCategory.HTTP,
+    EventCategory.LLM,
+    EventCategory.TOOL,
+    EventCategory.FILE,
+    EventCategory.PARSER,
+    EventCategory.ERROR,
+    EventCategory.PERFORMANCE,
+    EventCategory.SYSTEM,
+    EventCategory.AUTH,
+    EventCategory.SESSION,
+    EventCategory.CONFIG,
+    EventCategory.MCP,
+)
 
 
 class EventCardItem(QGraphicsObject):
     clicked = Signal(str)
 
-    def __init__(self, event_model: EventModel, width: float = 160, height: float = 54, parent: QGraphicsItem | None = None) -> None:
+    def __init__(self, event_model: EventModel, width: float = 176, height: float = 58, parent: QGraphicsItem | None = None) -> None:
         super().__init__(parent)
         self.event_model = event_model
         self.width = width
@@ -29,6 +48,7 @@ class EventCardItem(QGraphicsObject):
         self._selected = False
         self.setAcceptHoverEvents(True)
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setToolTip(self._tooltip_text())
 
     def set_selected(self, selected: bool) -> None:
         if self._selected != selected:
@@ -36,273 +56,349 @@ class EventCardItem(QGraphicsObject):
             self.update()
 
     def boundingRect(self) -> QRectF:
-        # Add extra margin for the dashed selection outline
-        return QRectF(-10, -10, self.width + 20, self.height + 20)
+        return QRectF(-12, -12, self.width + 24, self.height + 24)
 
     def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget: QWidget | None = None) -> None:
-        color = QColor(CATEGORY_COLORS.get(self.event_model.category, "#9aa4b2"))
-        
-        # Draw selected dash border outline
-        if self._selected:
-            painter.setPen(QPen(QColor("#d9e4ff"), 1.5, Qt.DashLine))
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRoundedRect(QRectF(-6, -6, self.width + 12, self.height + 12), 12, 12)
-            
-            painter.setPen(QPen(QColor("#d9e4ff"), 2))
-        else:
-            painter.setPen(QPen(color, 1.5))
-            
-        painter.setBrush(QBrush(QColor("#0d1728")))
-        rect = QRectF(0, 0, self.width, self.height)
-        painter.drawRoundedRect(rect, 9, 9)
+        event = self.event_model
+        color = QColor(CATEGORY_COLORS.get(event.category, "#9aa4b2"))
+        is_error = event.category == EventCategory.ERROR or event.level == EventLevel.ERROR
 
-        # Draw category indicator dot
+        rect = QRectF(0, 0, self.width, self.height)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        if self._selected:
+            painter.setPen(QPen(QColor("#d9e4ff"), 1.7, Qt.DashLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(QRectF(-7, -7, self.width + 14, self.height + 14), 13, 13)
+
+        painter.setPen(QPen(QColor("#ef4444") if is_error else color, 1.4))
+        painter.setBrush(QBrush(QColor("#0d1728")))
+        painter.drawRoundedRect(rect, 11, 11)
+
+        # Category stripe/dot.
         painter.setPen(Qt.NoPen)
         painter.setBrush(QBrush(color))
-        painter.drawEllipse(QRectF(11, 13, 8, 8))
+        painter.drawRoundedRect(QRectF(0, 0, 5, self.height), 3, 3)
+        painter.drawEllipse(QRectF(14, 14, 8, 8))
 
-        # Title
         font = QFont("Segoe UI", 9)
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(QColor(TEXT))
-        title_text = self.event_model.summary or self.event_model.type
-        painter.drawText(QRectF(28, 6, self.width - 34, 20), Qt.AlignLeft | Qt.AlignVCenter, title_text)
+        painter.drawText(QRectF(30, 6, self.width - 40, 21), Qt.AlignLeft | Qt.AlignVCenter, self._elide(title_for_event(event), 38))
 
-        # Subtitle
         font_sub = QFont("Segoe UI", 8)
         painter.setFont(font_sub)
         painter.setPen(QColor(TEXT_MUTED))
-        
-        sub_text = ""
-        if self.event_model.category == EventCategory.HTTP:
-            status = self.event_model.details.get("status_code", "")
-            duration = self.event_model.duration_ms
-            if duration is not None:
-                sub_text = f"{status} - {duration:.0f}ms" if status else f"{duration:.0f}ms"
-            else:
-                sub_text = str(status)
-        elif self.event_model.category == EventCategory.LLM:
-            if "finish_reason" in self.event_model.details:
-                sub_text = f"finish: {self.event_model.details['finish_reason']}"
-            elif "tokens" in self.event_model.details:
-                sub_text = f"tokens: {self.event_model.details['tokens']}"
-        elif self.event_model.category == EventCategory.TOOL:
-            sub_text = self.event_model.type
-        elif self.event_model.category == EventCategory.FILE:
-            sub_text = "file ref"
-        elif self.event_model.category == EventCategory.ERROR:
-            sub_text = self.event_model.details.get("message", "error")[:20]
-        else:
-            sub_text = self.event_model.type
+        painter.drawText(QRectF(30, 29, self.width - 40, 19), Qt.AlignLeft | Qt.AlignVCenter, self._elide(self._subtitle(), 44))
 
-        painter.drawText(QRectF(28, 28, self.width - 34, 20), Qt.AlignLeft | Qt.AlignVCenter, sub_text)
+        if is_error:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor("#ef4444")))
+            painter.drawEllipse(QRectF(self.width - 22, 9, 14, 14))
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(QRectF(self.width - 22, 8, 14, 14), Qt.AlignCenter, "!")
 
     def mouseReleaseEvent(self, evt) -> None:
         self.clicked.emit(self.event_model.id)
         super().mouseReleaseEvent(evt)
 
+    def _subtitle(self) -> str:
+        event = self.event_model
+        rendered = preview_for_event(event, max_chars=72)
+        if rendered and rendered not in ("unable to evaluate", "null"):
+            return rendered
+        details = event.details or {}
+        if event.category == EventCategory.HTTP:
+            status = details.get("status_code") or details.get("status") or ""
+            if event.duration_ms is not None:
+                return f"{status} · {event.duration_ms:.0f}ms" if status else f"{event.duration_ms:.0f}ms"
+            return str(status or event.type)
+        if event.category == EventCategory.LLM:
+            if details.get("finish_reason"):
+                return f"finish: {details['finish_reason']}"
+            tokens = details.get("tokens") or details.get("total_tokens") or details.get("prompt_tokens")
+            return f"tokens: {tokens}" if tokens else event.type
+        if event.category == EventCategory.TOOL:
+            return str(details.get("name") or details.get("tool") or event.type)
+        if event.category == EventCategory.FILE:
+            return event.refs[0].path if event.refs else "file ref"
+        if event.category == EventCategory.PERFORMANCE and event.duration_ms is not None:
+            return f"{event.duration_ms:.0f}ms"
+        if event.category == EventCategory.ERROR:
+            return str(details.get("message") or details.get("error") or event.type)[:42]
+        return event.type
+
+    def _tooltip_text(self) -> str:
+        event = self.event_model
+        return "\n".join([
+            event.summary or event.type,
+            f"preview: {preview_for_event(event, max_chars=180)}",
+            f"category: {event.category.value}",
+            f"level: {event.level.value}",
+            f"run: {event.run_id or '-'}",
+            f"request: {event.request_id or '-'}",
+        ])
+
+    @staticmethod
+    def _elide(value: str, limit: int) -> str:
+        value = str(value)
+        return value if len(value) <= limit else value[: max(0, limit - 1)] + "…"
+
 
 class ConnectorItem(QGraphicsObject):
-    def __init__(self, start_item: EventCardItem, end_item: EventCardItem, parent: QGraphicsItem | None = None) -> None:
+    def __init__(self, start_pos: QPointF, end_pos: QPointF, *, color: str = "#465674", dashed: bool = False,
+                 parent: QGraphicsItem | None = None) -> None:
         super().__init__(parent)
-        self.start_item = start_item
-        self.end_item = end_item
-        # Low Z-value to draw connectors behind cards
-        self.setZValue(-1)
+        self.start_pos = QPointF(start_pos)
+        self.end_pos = QPointF(end_pos)
+        self.color = QColor(color)
+        self.dashed = dashed
+        self.setZValue(-5)
 
     def boundingRect(self) -> QRectF:
-        p1 = self.start_item.pos() + QPointF(self.start_item.width / 2, self.start_item.height / 2)
-        p2 = self.end_item.pos() + QPointF(0, self.end_item.height / 2)
-        x_min = min(p1.x(), p2.x()) - 50
-        x_max = max(p1.x(), p2.x()) + 50
-        y_min = min(p1.y(), p2.y()) - 50
-        y_max = max(p1.y(), p2.y()) + 50
+        x_min = min(self.start_pos.x(), self.end_pos.x()) - 70
+        x_max = max(self.start_pos.x(), self.end_pos.x()) + 70
+        y_min = min(self.start_pos.y(), self.end_pos.y()) - 70
+        y_max = max(self.start_pos.y(), self.end_pos.y()) + 70
         return QRectF(x_min, y_min, x_max - x_min, y_max - y_min)
 
     def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget: QWidget | None = None) -> None:
-        p1 = self.start_item.pos() + QPointF(self.start_item.width / 2, self.start_item.height / 2)
-        p2 = self.end_item.pos() + QPointF(0, self.end_item.height / 2)
-        
-        path = QPainterPath(p1)
-        mid_x = (p1.x() + p2.x()) / 2
-        path.cubicTo(mid_x, p1.y(), mid_x, p2.y(), p2.x(), p2.y())
-        
-        painter.setPen(QPen(QColor("#465674"), 1.2))
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        path = QPainterPath(self.start_pos)
+        mid_x = (self.start_pos.x() + self.end_pos.x()) / 2
+        path.cubicTo(mid_x, self.start_pos.y(), mid_x, self.end_pos.y(), self.end_pos.x(), self.end_pos.y())
+        painter.setPen(QPen(self.color, 1.25, Qt.DashLine if self.dashed else Qt.SolidLine))
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(path)
 
 
 class TimelineScene(QGraphicsScene):
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(self, lane_y: dict[EventCategory, float], lane_counts: dict[EventCategory, int], parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.setBackgroundBrush(QBrush(QColor(BACKGROUND)))
-        self._lane_y = {
-            EventCategory.HTTP: 100.0,
-            EventCategory.LLM: 180.0,
-            EventCategory.TOOL: 260.0,
-            EventCategory.FILE: 340.0,
-            EventCategory.PARSER: 420.0,
-            EventCategory.ERROR: 500.0,
-            EventCategory.PERFORMANCE: 580.0,
-        }
-        self.setSceneRect(0, 0, 1200, 700)
-
-    def set_lane_y(self, lane_y_map: dict[EventCategory, float]) -> None:
-        self._lane_y = lane_y_map
-        self.update()
+        self._lane_y = lane_y
+        self._lane_counts = lane_counts
+        self._lane_height = 72.0
 
     def drawBackground(self, painter: QPainter, rect: QRectF) -> None:
         super().drawBackground(painter, rect)
-        
-        # Draw lane dotted lines
-        font = QFont("Segoe UI", 10)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        # Subtle vertical time grid.
+        grid_pen = QPen(QColor("#172033"), 1, Qt.DotLine)
+        painter.setPen(grid_pen)
+        left = max(140, int(rect.left()) - (int(rect.left()) % 160))
+        right = int(rect.right()) + 160
+        for x in range(left, right, 160):
+            painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
+
+        font = QFont("Segoe UI", 9)
         font.setBold(True)
         painter.setFont(font)
-        
-        for category, y in self._lane_y.items():
+
+        for index, (category, y) in enumerate(self._lane_y.items()):
+            band = QRectF(0, y - self._lane_height / 2, self.sceneRect().width(), self._lane_height)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor("#0d1424" if index % 2 == 0 else "#0a1020")))
+            painter.drawRect(band)
+
             color = QColor(CATEGORY_COLORS.get(category, "#9aa4b2"))
-            
-            # Label
-            painter.setPen(QPen(color))
-            painter.drawText(QRectF(10, y - 10, 100, 20), Qt.AlignLeft | Qt.AlignVCenter, category.value.upper())
-            
-            # Dotted line
             painter.setPen(QPen(color, 1, Qt.DashLine))
-            painter.drawLine(QPointF(110, y), QPointF(self.sceneRect().width() - 20, y))
+            painter.drawLine(QPointF(128, y), QPointF(self.sceneRect().width() - 24, y))
+
+            painter.setPen(color)
+            painter.drawText(QRectF(14, y - 17, 92, 20), Qt.AlignLeft | Qt.AlignVCenter, category.value.upper())
+            painter.setPen(QColor(TEXT_MUTED))
+            painter.drawText(QRectF(92, y - 17, 28, 20), Qt.AlignRight | Qt.AlignVCenter, str(self._lane_counts.get(category, 0)))
 
 
 class TimelineView(QGraphicsView):
     event_selected = Signal(str)
+    zoom_changed = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
+        self._lane_y: dict[EventCategory, float] = {}
+        self._lane_counts: dict[EventCategory, int] = {}
+        self._scene = TimelineScene(self._lane_y, self._lane_counts)
         super().__init__(parent)
-        self._scene = TimelineScene(self)
         self.setScene(self._scene)
         self.setRenderHint(QPainter.Antialiasing)
-        self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
+        self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setFrameShape(QGraphicsView.NoFrame)
         self.setBackgroundBrush(QBrush(QColor(BACKGROUND)))
+        self.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.setInteractive(True)
+        self.setCursor(QCursor(Qt.OpenHandCursor))
         self.selected_event_id: str | None = None
         self.items_map: dict[str, EventCardItem] = {}
         self.connectors: list[ConnectorItem] = []
+        self._zoom_percent = 100
+
+    def set_zoom_percent(self, percent: int) -> None:
+        percent = max(35, min(220, int(percent)))
+        if percent == self._zoom_percent:
+            return
+        self._zoom_percent = percent
+        self.resetTransform()
+        scale = percent / 100.0
+        self.scale(scale, scale)
+        self.zoom_changed.emit(percent)
+
+    def zoom_percent(self) -> int:
+        return self._zoom_percent
+
+    def zoom_in(self) -> None:
+        self.set_zoom_percent(self._zoom_percent + 10)
+
+    def zoom_out(self) -> None:
+        self.set_zoom_percent(self._zoom_percent - 10)
+
+    def reset_zoom(self) -> None:
+        self.set_zoom_percent(100)
+
+    def wheelEvent(self, event) -> None:
+        if event.modifiers() & Qt.ControlModifier:
+            self.set_zoom_percent(self._zoom_percent + (10 if event.angleDelta().y() > 0 else -10))
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self.setCursor(QCursor(Qt.ClosedHandCursor))
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        super().mouseReleaseEvent(event)
+        self.setCursor(QCursor(Qt.OpenHandCursor))
 
     def set_selected_event(self, event_id: str | None) -> None:
         self.selected_event_id = event_id
         for eid, item in self.items_map.items():
             item.set_selected(eid == event_id)
+        if event_id and event_id in self.items_map:
+            self.ensureVisible(self.items_map[event_id], 80, 80)
 
     def populate_events(self, events: list[EventModel], visual_state: str = "main_desktop_timeline") -> None:
-        # Remove and clear connectors first to prevent access violations during C++ teardown
-        for conn in list(self.connectors):
-            try:
-                self._scene.removeItem(conn)
-            except Exception:
-                pass
-        self.connectors.clear()
+        self.setUpdatesEnabled(False)
+        old_scene = self._scene
+        try:
+            lane_order = self._active_lanes(events)
+            self._lane_y = {cat: 88.0 + i * 86.0 for i, cat in enumerate(lane_order)}
+            self._lane_counts = {cat: sum(1 for event in events if event.category == cat) for cat in lane_order}
+            self._scene = TimelineScene(self._lane_y, self._lane_counts, self)
+            self.setScene(self._scene)
+            self.items_map = {}
+            self.connectors = []
+            if old_scene is not None:
+                old_scene.deleteLater()
 
-        # Remove and clear card items
-        for item in list(self.items_map.values()):
-            try:
-                self._scene.removeItem(item)
-            except Exception:
-                pass
-        self.items_map.clear()
+            if not events:
+                self._scene.setSceneRect(0, 0, 900, 420)
+                return
 
-        self._scene.clear()
-        
-        if not events:
-            return
+            positions, widths = self._layout_events(events, lane_order, visual_state)
+            max_x = max((x + widths.get(event_id, 176) for event_id, (x, _y) in positions.items()), default=900)
+            max_y = max(self._lane_y.values(), default=300) + 72
+            self._scene.setSceneRect(0, 0, max(980, max_x + 180), max(420, max_y))
 
-        # Setup lane heights and positioning based on mockup state
-        if visual_state == "timeline_filmstrip_focused":
-            self._scene.setSceneRect(0, 0, 1300, 720)
-            self._scene.set_lane_y({
-                EventCategory.HTTP: 160.0,
-                EventCategory.LLM: 250.0,
-                EventCategory.TOOL: 340.0,
-                EventCategory.FILE: 430.0,
-                EventCategory.PARSER: 520.0,
-                EventCategory.ERROR: 610.0,
-            })
-        else:
-            self._scene.setSceneRect(0, 0, 1000, 700)
-            self._scene.set_lane_y({
-                EventCategory.HTTP: 120.0,
-                EventCategory.LLM: 200.0,
-                EventCategory.TOOL: 280.0,
-                EventCategory.FILE: 360.0,
-                EventCategory.ERROR: 440.0,
-                EventCategory.PERFORMANCE: 520.0,
-            })
+            for event in events:
+                x, y = positions[event.id]
+                item = EventCardItem(event, width=widths.get(event.id, 176), height=58)
+                item.setPos(x, y)
+                item.clicked.connect(self._on_card_clicked)
+                self._scene.addItem(item)
+                self.items_map[event.id] = item
 
-        # Predefined mockup positioning to ensure visual QA passes perfectly
-        mockup_positions = {}
-        if visual_state == "timeline_filmstrip_focused":
-            mockup_positions = {
-                "evt_http_request": (161.0, 131.0, 134.0),
-                "evt_http_response": (343.0, 131.0, 116.0),
-                "evt_llm_request": (266.0, 221.0, 165.0),
-                "evt_llm_response": (491.0, 221.0, 190.0),
-                "evt_tool_call": (721.0, 311.0, 170.0),
-                "evt_tool_result": (936.0, 311.0, 160.0),
-                "evt_file_ref": (1141.0, 401.0, 132.0),
-                "evt_parser_warning": (691.0, 491.0, 220.0),
-                "evt_parse_error": (871.0, 581.0, 180.0),
-            }
-        else:
-            # main_desktop_timeline or event_detail_inspector
-            mockup_positions = {
-                "evt_http_request": (51.0, 96.0, 150.0),
-                "evt_llm_request": (226.0, 176.0, 178.0),
-                "evt_llm_response": (416.0, 176.0, 178.0),
-                "evt_tool_call": (381.0, 256.0, 185.0),
-                "evt_tool_result": (591.0, 256.0, 90.0),
-                "evt_file_ref": (451.0, 336.0, 160.0),
-                "evt_parse_error": (537.0, 416.0, 144.0),
-                "evt_latency": (171.0, 496.0, 220.0),
-            }
+            self._create_connectors(events)
+            self.set_selected_event(self.selected_event_id)
+        finally:
+            self.setUpdatesEnabled(True)
+            self.viewport().update()
 
-        # Create cards
+    def _on_card_clicked(self, event_id: str) -> None:
+        self.event_selected.emit(event_id)
+
+    def _active_lanes(self, events: Iterable[EventModel]) -> list[EventCategory]:
+        present = {event.category for event in events}
+        ordered = [cat for cat in LANE_ORDER if cat in present]
+        for cat in sorted(present, key=lambda c: c.value):
+            if cat not in ordered:
+                ordered.append(cat)
+        return ordered or [EventCategory.HTTP, EventCategory.LLM, EventCategory.TOOL, EventCategory.FILE, EventCategory.ERROR]
+
+    def _layout_events(self, events: list[EventModel], lane_order: list[EventCategory], visual_state: str) -> tuple[dict[str, tuple[float, float]], dict[str, float]]:
+        sorted_events = sorted(events, key=lambda e: e.timestamp)
+        lane_slots: dict[EventCategory, int] = defaultdict(int)
+        positions: dict[str, tuple[float, float]] = {}
+        widths: dict[str, float] = {}
+        min_ts = min(event.timestamp for event in sorted_events)
+        max_ts = max(event.timestamp for event in sorted_events)
+        total = max(0.001, (max_ts - min_ts).total_seconds())
+        dense = visual_state == "timeline_filmstrip_focused" or len(sorted_events) > 80
+        px_per_second = max(22.0, min(190.0, 980.0 / total)) if total > 0.001 else 160.0
+        base_x = 155.0
+
+        for event in sorted_events:
+            lane_y = self._lane_y.get(event.category, 240.0)
+            slot = lane_slots[event.category]
+            elapsed = (event.timestamp - min_ts).total_seconds()
+            x = base_x + elapsed * px_per_second
+
+            # Enforce minimum spacing inside a lane so same-timestamp events become a filmstrip.
+            min_x = base_x + slot * (132 if dense else 190)
+            x = max(x, min_x)
+            lane_slots[event.category] += 1
+
+            width = self._card_width(event, dense)
+            widths[event.id] = width
+            y_offset = self._lane_offset(event)
+            positions[event.id] = (x, lane_y - 29.0 + y_offset)
+
+        return positions, widths
+
+    def _lane_offset(self, event: EventModel) -> float:
+        hay = f"{event.type} {event.summary}".casefold()
+        if any(word in hay for word in ("response", "received", "result")):
+            return 10.0
+        if any(word in hay for word in ("request", "send", "call")):
+            return -10.0
+        return 0.0
+
+    def _card_width(self, event: EventModel, dense: bool) -> float:
+        if dense:
+            return 134.0 if event.category in (EventCategory.HTTP, EventCategory.FILE) else 158.0
+        text_len = len(event.summary or event.type)
+        return max(128.0, min(238.0, 118.0 + text_len * 4.0))
+
+    def _create_connectors(self, events: list[EventModel]) -> None:
+        # Explicit parent/child links.
         for event in events:
-            # Determine card geometry
-            x, y, w = 0.0, 0.0, 160.0
-            if event.id in mockup_positions:
-                x, y, w = mockup_positions[event.id]
-            else:
-                # Dynamic layout fallback:
-                # Map categories to lane Y coordinates
-                lane_y = self._scene._lane_y.get(event.category, 300.0)
-                y = lane_y - 27.0 # Center on lane
-                
-                # Basic sequential time layout
-                min_time = min(e.timestamp for e in events)
-                max_time = max(e.timestamp for e in events)
-                if max_time > min_time:
-                    total_sec = (max_time - min_time).total_seconds()
-                    evt_sec = (event.timestamp - min_time).total_seconds()
-                    # Scale to fit width
-                    x = 50.0 + (evt_sec / (total_sec if total_sec > 0 else 1.0)) * (self._scene.sceneRect().width() - 250.0)
-                else:
-                    x = 50.0 + events.index(event) * 180.0
+            if event.parent_event_id and event.parent_event_id in self.items_map and event.id in self.items_map:
+                self._add_connector(event.parent_event_id, event.id, dashed=False)
 
-            item = EventCardItem(event, width=w, height=54)
-            item.setPos(x, y)
-            item.clicked.connect(self.event_selected.emit)
-            self._scene.addItem(item)
-            self.items_map[event.id] = item
-
-        # Set selection status
-        self.set_selected_event(self.selected_event_id)
-
-        # Create connectors
-        self.connectors.clear()
+        # Inferred run/request flow links, so the graph still has connections when parent ids are absent.
+        grouped: dict[tuple[str | None, str | None], list[EventModel]] = defaultdict(list)
         for event in events:
-            if event.parent_event_id and event.parent_event_id in self.items_map:
-                parent_item = self.items_map[event.parent_event_id]
-                child_item = self.items_map[event.id]
-                connector = ConnectorItem(parent_item, child_item)
-                self._scene.addItem(connector)
-                self.connectors.append(connector)
+            key = (event.run_id, event.request_id)
+            if any(key):
+                grouped[key].append(event)
+        linked = {(e.parent_event_id, e.id) for e in events if e.parent_event_id}
+        for chain in grouped.values():
+            chain = sorted(chain, key=lambda e: e.timestamp)
+            for prev, cur in zip(chain, chain[1:]):
+                if (prev.id, cur.id) not in linked and prev.id in self.items_map and cur.id in self.items_map:
+                    self._add_connector(prev.id, cur.id, dashed=True)
+
+    def _add_connector(self, from_id: str, to_id: str, *, dashed: bool) -> None:
+        start_item = self.items_map[from_id]
+        end_item = self.items_map[to_id]
+        start = start_item.pos() + QPointF(start_item.width, start_item.height / 2)
+        end = end_item.pos() + QPointF(0, end_item.height / 2)
+        color = CATEGORY_COLORS.get(end_item.event_model.category, "#465674")
+        connector = ConnectorItem(start, end, color=color, dashed=dashed)
+        self._scene.addItem(connector)
+        self.connectors.append(connector)

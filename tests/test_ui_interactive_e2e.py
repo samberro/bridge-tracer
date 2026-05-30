@@ -60,6 +60,7 @@ def test_full_flow_with_real_mouse_clicks(qapp, tmp_path):
     assert w.controller.status.recording_state == RecordingState.STOPPED
     assert not w.stop_btn.isEnabled()
     w.close()
+    w.deleteLater()
 
 
 def test_save_and_load_roundtrip_with_real_clicks(qapp, tmp_path):
@@ -70,6 +71,7 @@ def test_save_and_load_roundtrip_with_real_clicks(qapp, tmp_path):
     _click(saver.save_btn)
     assert path.exists()
     saver.close()
+    saver.deleteLater()
 
     loader = InteractiveTracerWindow(events=[])
     assert loader.event_count() == 0
@@ -78,3 +80,4 @@ def test_save_and_load_roundtrip_with_real_clicks(qapp, tmp_path):
     assert loader.event_count() == len(build_sample_events())
     assert loader.inspector_text().strip() != ""
     loader.close()
+    loader.deleteLater()

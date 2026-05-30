@@ -56,6 +56,7 @@ def test_start_ingests_live_bridge_events_into_timeline(qapp):
     assert w.event_count() == 3
     assert "3 events" in w.status_label.text()
     w.close()
+    w.deleteLater()
 
 
 def test_stop_halts_polling(qapp):
@@ -72,6 +73,7 @@ def test_stop_halts_polling(qapp):
     box.append(_log(2))
     assert w.poll_once() == 0
     w.close()
+    w.deleteLater()
 
 
 def test_poll_error_surfaces_and_stops_timer(qapp):
@@ -90,3 +92,4 @@ def test_poll_error_surfaces_and_stops_timer(qapp):
     assert "error" in w.status_label.text().lower()
     assert not w._poll_timer.isActive()
     w.close()
+    w.deleteLater()

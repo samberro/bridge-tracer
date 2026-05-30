@@ -29,4 +29,6 @@ def flush_events_after_test():
     app = QApplication.instance()
     if app:
         app.processEvents()
+    import gc
+    gc.collect()
 

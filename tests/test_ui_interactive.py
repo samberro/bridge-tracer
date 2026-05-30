@@ -33,6 +33,7 @@ def window(qapp):
     w.show()
     yield w
     w.close()
+    w.deleteLater()
 
 
 # --- Real widgets exist (the core regression) -------------------------------
@@ -109,6 +110,7 @@ def test_save_then_load_roundtrip(qapp, tmp_path):
     w1.save_btn.click()
     assert path.exists()
     w1.close()
+    w1.deleteLater()
 
     w2 = InteractiveTracerWindow(events=[])
     assert w2.event_count() == 0
@@ -116,6 +118,7 @@ def test_save_then_load_roundtrip(qapp, tmp_path):
     w2.load_btn.click()
     assert w2.event_count() == len(build_sample_events())
     w2.close()
+    w2.deleteLater()
 
 
 def test_save_is_noop_when_path_provider_returns_none(qapp):
@@ -123,3 +126,4 @@ def test_save_is_noop_when_path_provider_returns_none(qapp):
     w.save_path_provider = lambda: None
     w.save_btn.click()  # must not raise
     w.close()
+    w.deleteLater()

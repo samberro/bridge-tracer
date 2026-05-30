@@ -37,6 +37,8 @@ def test_bridge_tracer_window_exposes_expected_visual_states() -> None:
     }
     assert window.canvas.use_mockup_backdrop is False
     assert window.canvas.selected_event_id == "evt_llm_response"
+    window.close()
+    window.deleteLater()
 
 
 def test_bridge_tracer_window_start_stop_controls_update_state() -> None:
@@ -51,6 +53,8 @@ def test_bridge_tracer_window_start_stop_controls_update_state() -> None:
 
     window.canvas.click_control("stop")
     assert window.controller.status.recording_state == RecordingState.STOPPED
+    window.close()
+    window.deleteLater()
 
 
 def test_bridge_tracer_window_event_hit_testing_updates_inspector() -> None:
@@ -69,6 +73,8 @@ def test_bridge_tracer_window_event_hit_testing_updates_inspector() -> None:
 
     assert window.canvas.selected_event_id == "evt_http_request"
     assert window.canvas.current_detail().title == "POST /api/send"
+    window.close()
+    window.deleteLater()
 
 
 def test_bridge_tracer_window_can_capture_deterministic_screenshot(tmp_path: Path) -> None:
@@ -83,6 +89,8 @@ def test_bridge_tracer_window_can_capture_deterministic_screenshot(tmp_path: Pat
 
     assert output.exists()
     assert output.stat().st_size > 0
+    window.close()
+    window.deleteLater()
 
 
 def test_normal_window_repaints_visible_state_after_start(tmp_path: Path) -> None:
@@ -103,6 +111,8 @@ def test_normal_window_repaints_visible_state_after_start(tmp_path: Path) -> Non
     score = sum(ImageStat.Stat(diff).mean)
     assert before_image.size == after_image.size
     assert score > 0
+    window.close()
+    window.deleteLater()
 
 
 def _load_rgb(path: Path):

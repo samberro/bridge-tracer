@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QPoint, QRect, Qt, QTimer, Signal
+from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
     QCheckBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -17,12 +19,15 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QPushButton,
     QScrollArea,
     QSplitter,
     QTabWidget,
     QTextEdit,
+    QGraphicsOpacityEffect,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -34,11 +39,26 @@ from src.ui.controller import BridgeTracerController
 from src.ui.sample_data import build_sample_events
 from src.ui.theme import BACKGROUND, BORDER, CATEGORY_COLORS, SURFACE, SURFACE_DARK, SURFACE_ALT, TEXT, TEXT_DIM, TEXT_MUTED
 from src.ui.timeline_view import TimelineView
+from src.ui.render_rules import (
+    RenderRule,
+    evaluate_expression,
+    get_rules,
+    pinned_values_for_event,
+    reset_rules,
+)
 from src.ui.view_models import EventDetail, TimelineViewModel
+
+
+def _env_auth_token() -> str:
+    token = os.environ.get("AI_BRIDGE_AUTH_TOKEN", "").strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    return token
+
 
 _ID_ROLE = Qt.UserRole + 1
 
-_STYLE = f"""
+_STYLE = """
 QMainWindow, QWidget {{ background: {BACKGROUND}; color: {TEXT}; }}
 QLabel {{ color: {TEXT}; }}
 QLineEdit {{
@@ -78,8 +98,20 @@ QFrame#logs_frame {{
     border: 1px solid {BORDER};
     border-radius: 12px;
 }}
+
+QSplitter::handle {
+#     background: #1b2940;
+}
+QSplitter::handle:hover {
+#     background: #2f5f9b;
+}
+QFrame#inspector_section {
+#     background: #0b1526;
+    border: 1px solid #1f2a3d;
+    border-radius: 10px;
+}
 QFrame#trigger_card {{
-    background: #0b1526;
+#     background: #0b1526;
     border: 1px solid {BORDER};
     border-radius: 14px;
 }}
@@ -115,11 +147,114 @@ QTabBar::tab {{
     border-top-right-radius: 8px;
 }}
 QTabBar::tab:selected {{
-    background: #16233b;
+#     background: #16233b;
     color: {TEXT};
     font-weight: bold;
 }}
 """
+
+
+class RenderSettingsDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Render / Pin Rules")
+        self.resize(720, 420)
+        self.setStyleSheet(_STYLE)
+        layout = QVBoxLayout(self)
+        help_lbl = QLabel("Rules are matched by event type/category/summary. Expression examples: $.details.status_code, last_message(obj), path(obj, 'details.messages[-1].content').")
+        help_lbl.setWordWrap(True)
+        help_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        layout.addWidget(help_lbl)
+
+        self.rules_list = QListWidget()
+        layout.addWidget(self.rules_list, 1)
+
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("Rule name")
+        self.pattern_edit = QLineEdit()
+        self.pattern_edit.setPlaceholderText("Type/category pattern, or /regex/")
+        self.expr_edit = QLineEdit()
+        self.expr_edit.setPlaceholderText("Expression")
+        self.enabled_chk = QCheckBox("Enabled")
+        self.pin_chk = QCheckBox("Pin to object view top")
+
+        layout.addWidget(self.name_edit)
+        layout.addWidget(self.pattern_edit)
+        layout.addWidget(self.expr_edit)
+        row = QHBoxLayout()
+        row.addWidget(self.enabled_chk)
+        row.addWidget(self.pin_chk)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        btns = QHBoxLayout()
+        self.add_btn = QPushButton("Add")
+        self.save_btn = QPushButton("Save Selected")
+        self.reset_btn = QPushButton("Reset Defaults")
+        close_btn = QPushButton("Close")
+        btns.addWidget(self.add_btn)
+        btns.addWidget(self.save_btn)
+        btns.addWidget(self.reset_btn)
+        btns.addStretch(1)
+        btns.addWidget(close_btn)
+        layout.addLayout(btns)
+
+        self.rules_list.currentRowChanged.connect(self._load_selected)
+        self.add_btn.clicked.connect(self._add_rule)
+        self.save_btn.clicked.connect(self._save_selected)
+        self.reset_btn.clicked.connect(self._reset_rules)
+        close_btn.clicked.connect(self.accept)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self.rules_list.clear()
+        for rule in get_rules():
+            state = "✓" if rule.enabled else "–"
+            pin = " 📌" if rule.pin else ""
+            self.rules_list.addItem(f"{state} {rule.name}{pin}  [{rule.type_pattern}] → {rule.expression}")
+        if self.rules_list.count() and self.rules_list.currentRow() < 0:
+            self.rules_list.setCurrentRow(0)
+
+    def _selected_rule(self) -> RenderRule | None:
+        row = self.rules_list.currentRow()
+        rules = get_rules()
+        return rules[row] if 0 <= row < len(rules) else None
+
+    def _load_selected(self, _row: int) -> None:
+        rule = self._selected_rule()
+        if rule is None:
+            return
+        self.name_edit.setText(rule.name)
+        self.pattern_edit.setText(rule.type_pattern)
+        self.expr_edit.setText(rule.expression)
+        self.enabled_chk.setChecked(rule.enabled)
+        self.pin_chk.setChecked(rule.pin)
+
+    def _save_selected(self) -> None:
+        rule = self._selected_rule()
+        if rule is None:
+            return
+        rule.name = self.name_edit.text().strip() or rule.name
+        rule.type_pattern = self.pattern_edit.text().strip() or "*"
+        rule.expression = self.expr_edit.text().strip() or rule.expression
+        rule.enabled = self.enabled_chk.isChecked()
+        rule.pin = self.pin_chk.isChecked()
+        self._refresh()
+
+    def _add_rule(self) -> None:
+        get_rules().append(RenderRule(
+            name=self.name_edit.text().strip() or "Custom rule",
+            type_pattern=self.pattern_edit.text().strip() or "*",
+            expression=self.expr_edit.text().strip() or "$.summary",
+            enabled=self.enabled_chk.isChecked(),
+            pin=self.pin_chk.isChecked(),
+        ))
+        self._refresh()
+        self.rules_list.setCurrentRow(self.rules_list.count() - 1)
+
+    def _reset_rules(self) -> None:
+        reset_rules()
+        self._refresh()
 
 
 class MainWindow(QMainWindow):
@@ -153,6 +288,21 @@ class MainWindow(QMainWindow):
         self._poll_timer.setInterval(self.poll_interval_ms)
         self._poll_timer.timeout.connect(self._poll_once)
 
+        # Debounce expensive full timeline rebuilds during live streaming.
+        self._timeline_rebuild_pending = False
+        self._timeline_rebuild_timer = QTimer(self)
+        self._timeline_rebuild_timer.setSingleShot(True)
+        self._timeline_rebuild_timer.setInterval(125)
+        self._timeline_rebuild_timer.timeout.connect(self._flush_pending_timeline_rebuild)
+
+        self._post_filter_text = ""
+        self._post_filter_categories: set[EventCategory] = set(EventCategory)
+        self._post_errors_only = False
+        self._filter_panel_visible = False
+        self._filter_anim: QPropertyAnimation | None = None
+        self._filter_opacity: QGraphicsOpacityEffect | None = None
+        self._zoom_percent = 100
+
         self._build_ui()
         self.set_visual_state(visual_state)
         self._refresh_controls()
@@ -165,30 +315,45 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.central)
         self.root_layout = QVBoxLayout(self.central)
         self.root_layout.setContentsMargins(16, 14, 16, 14)
-        self.root_layout.setSpacing(12)
+        self.root_layout.setSpacing(10)
 
         # Toolbar
         self._build_toolbar()
 
-        # Workspace Area (Splitter for left, center, right)
-        self.workspace_layout = QHBoxLayout()
-        self.workspace_layout.setSpacing(12)
-        self.workspace_layout.setContentsMargins(0, 0, 0, 0)
-        self.root_layout.addLayout(self.workspace_layout, 1)
+        # Transient filter panel. It animates open/closed and fully disappears
+        # when collapsed, so it never leaves a dead strip in the layout.
+        self.filter_panel = QFrame()
+        self.filter_panel.setObjectName("sidebar_frame")
+        self._build_filter_panel()
+        self._filter_opacity = QGraphicsOpacityEffect(self.filter_panel)
+        self._filter_opacity.setOpacity(0.0)
+        self.filter_panel.setGraphicsEffect(self._filter_opacity)
+        self.filter_panel.setMaximumHeight(0)
+        self.filter_panel.hide()
+        self.root_layout.addWidget(self.filter_panel)
+
+        # Main workspace is horizontally resizable. The right inspector width is
+        # user-adjustable instead of fixed, and the sidebar can still be hidden
+        # by visual state without disturbing the timeline.
+        self.workspace_splitter = QSplitter(Qt.Horizontal)
+        self.workspace_splitter.setObjectName("workspace_splitter")
+        self.workspace_splitter.setChildrenCollapsible(False)
+        self.root_layout.addWidget(self.workspace_splitter, 1)
 
         # Left Sidebar Panel
         self.sidebar_widget = QFrame()
         self.sidebar_widget.setObjectName("sidebar_frame")
-        self.sidebar_widget.setFixedWidth(276)
+        self.sidebar_widget.setMinimumWidth(220)
+        self.sidebar_widget.setMaximumWidth(420)
         self._build_sidebar()
-        self.workspace_layout.addWidget(self.sidebar_widget)
+        self.workspace_splitter.addWidget(self.sidebar_widget)
 
         # Center Container
         self.center_container = QWidget()
         self.center_layout = QVBoxLayout(self.center_container)
         self.center_layout.setContentsMargins(0, 0, 0, 0)
-        self.center_layout.setSpacing(12)
-        self.workspace_layout.addWidget(self.center_container, 1)
+        self.center_layout.setSpacing(10)
+        self.workspace_splitter.addWidget(self.center_container)
 
         # Center tabs (Timeline + List view)
         self.center_tabs = QTabWidget()
@@ -197,6 +362,7 @@ class MainWindow(QMainWindow):
         # Timeline View (tab 1)
         self.timeline_view = TimelineView()
         self.timeline_view.event_selected.connect(self.select_event)
+        self.timeline_view.zoom_changed.connect(self._on_timeline_zoom_changed)
         self.center_tabs.addTab(self.timeline_view, "Timeline Flow")
 
         # Tree View Event List (tab 2 for compatibility)
@@ -218,17 +384,22 @@ class MainWindow(QMainWindow):
         self._build_trigger_matrix()
         self.center_layout.addWidget(self.trigger_matrix_widget, 1)
 
-        # Right Inspector Panel
+        # Right Inspector Panel. Width is controlled by workspace_splitter.
         self.inspector_widget = QFrame()
         self.inspector_widget.setObjectName("inspector_frame")
-        self.inspector_widget.setFixedWidth(384)
+        self.inspector_widget.setMinimumWidth(300)
+        self.inspector_widget.setMaximumWidth(900)
         self._build_inspector()
-        self.workspace_layout.addWidget(self.inspector_widget)
+        self.workspace_splitter.addWidget(self.inspector_widget)
+        self.workspace_splitter.setStretchFactor(0, 0)
+        self.workspace_splitter.setStretchFactor(1, 1)
+        self.workspace_splitter.setStretchFactor(2, 0)
+        self.workspace_splitter.setSizes([0, 930, 420])
 
         # Bottom Collapsible Logs Panel
         self.logs_panel = QFrame()
         self.logs_panel.setObjectName("logs_frame")
-        self.logs_panel.setFixedHeight(50)
+        self.logs_panel.setFixedHeight(42)
         self._build_logs_panel()
         self.root_layout.addWidget(self.logs_panel)
 
@@ -246,8 +417,8 @@ class MainWindow(QMainWindow):
         self.url_edit.setFixedWidth(220)
         self.toolbar_layout.addWidget(self.url_edit)
 
-        self.token_edit = QLineEdit()
-        self.token_edit.setPlaceholderText("Bearer token")
+        self.token_edit = QLineEdit(_env_auth_token())
+        self.token_edit.setPlaceholderText("Bearer token or AI_BRIDGE_AUTH_TOKEN")
         self.token_edit.setEchoMode(QLineEdit.Password)
         self.token_edit.setFixedWidth(170)
         self.toolbar_layout.addWidget(self.token_edit)
@@ -278,6 +449,29 @@ class MainWindow(QMainWindow):
         self.load_btn.clicked.connect(self._on_load)
         self.toolbar_layout.addWidget(self.load_btn)
 
+        self.filter_btn = QPushButton("Filters")
+        self.filter_btn.setCheckable(True)
+        self.filter_btn.clicked.connect(self._toggle_filter_panel)
+        self.toolbar_layout.addWidget(self.filter_btn)
+
+        self.render_settings_btn = QPushButton("Render Rules")
+        self.render_settings_btn.clicked.connect(self._open_render_settings)
+        self.toolbar_layout.addWidget(self.render_settings_btn)
+
+        self.zoom_out_btn = QPushButton("−")
+        self.zoom_out_btn.setFixedWidth(34)
+        self.zoom_out_btn.clicked.connect(self._zoom_out)
+        self.toolbar_layout.addWidget(self.zoom_out_btn)
+
+        self.zoom_label = QLabel("Zoom 100%")
+        self.zoom_label.setStyleSheet("font-size: 11px; color: #94a3b8;")
+        self.toolbar_layout.addWidget(self.zoom_label)
+
+        self.zoom_in_btn = QPushButton("+")
+        self.zoom_in_btn.setFixedWidth(34)
+        self.zoom_in_btn.clicked.connect(self._zoom_in)
+        self.toolbar_layout.addWidget(self.zoom_in_btn)
+
         self.toolbar_layout.addStretch(1)
 
         self.status_label = QLabel()
@@ -285,6 +479,52 @@ class MainWindow(QMainWindow):
         self.toolbar_layout.addWidget(self.status_label)
 
         self.root_layout.addLayout(self.toolbar_layout)
+
+    def _build_filter_panel(self) -> None:
+        layout = QVBoxLayout(self.filter_panel)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
+
+        top = QHBoxLayout()
+        title = QLabel("Post-record filters")
+        title.setStyleSheet("font-size: 11px; font-weight: bold; color: #94a3b8;")
+        top.addWidget(title)
+        top.addStretch(1)
+        close_btn = QPushButton("Hide")
+        close_btn.setFixedWidth(64)
+        close_btn.clicked.connect(self._toggle_filter_panel)
+        top.addWidget(close_btn)
+        layout.addLayout(top)
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(QLabel("Search"))
+        self.post_search_edit = QLineEdit()
+        self.post_search_edit.setPlaceholderText("summary, type, details, run_id, request_id…")
+        self.post_search_edit.textChanged.connect(self._on_post_filter_changed)
+        row.addWidget(self.post_search_edit, 1)
+
+        self.post_errors_only_chk = QCheckBox("Errors only")
+        self.post_errors_only_chk.stateChanged.connect(self._on_post_filter_changed)
+        row.addWidget(self.post_errors_only_chk)
+        layout.addLayout(row)
+
+        cat_row = QHBoxLayout()
+        cat_row.setSpacing(8)
+        cat_row.addWidget(QLabel("Categories"))
+        self.post_category_checks: dict[EventCategory, QCheckBox] = {}
+        for category in [EventCategory.HTTP, EventCategory.LLM, EventCategory.TOOL, EventCategory.FILE, EventCategory.PARSER, EventCategory.ERROR, EventCategory.PERFORMANCE]:
+            chk = QCheckBox(category.value)
+            chk.setChecked(True)
+            chk.stateChanged.connect(self._on_post_filter_changed)
+            self.post_category_checks[category] = chk
+            cat_row.addWidget(chk)
+        cat_row.addStretch(1)
+
+        self.clear_filters_btn = QPushButton("Clear")
+        self.clear_filters_btn.clicked.connect(self._clear_post_filters)
+        cat_row.addWidget(self.clear_filters_btn)
+        layout.addLayout(cat_row)
 
     def _build_sidebar(self) -> None:
         layout = QVBoxLayout(self.sidebar_widget)
@@ -420,46 +660,111 @@ class MainWindow(QMainWindow):
 
     def _build_inspector(self) -> None:
         layout = QVBoxLayout(self.inspector_widget)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
 
+        header_row = QHBoxLayout()
         lbl = QLabel("EVENT INSPECTOR")
         lbl.setStyleSheet("font-size: 9px; font-weight: bold; color: #8390a5;")
-        layout.addWidget(lbl)
+        header_row.addWidget(lbl)
+        header_row.addStretch(1)
+        resize_hint = QLabel("drag dividers to resize")
+        resize_hint.setStyleSheet("font-size: 9px; color: #64748b;")
+        header_row.addWidget(resize_hint)
+        layout.addLayout(header_row)
 
         self.ins_title = QLabel("No event selected")
-        self.ins_title.setStyleSheet("font-size: 18px; font-weight: bold;")
+        self.ins_title.setStyleSheet("font-size: 15px; font-weight: bold;")
         self.ins_title.setWordWrap(True)
         layout.addWidget(self.ins_title)
 
-        # Badges layout
         self.badges_layout = QHBoxLayout()
-        self.badges_layout.setSpacing(6)
+        self.badges_layout.setSpacing(5)
         layout.addLayout(self.badges_layout)
 
-        # Metadata Fields
+        # All main inspector sections are vertically resizable. This prevents
+        # the object browser/raw JSON/evaluate areas from collapsing each other.
+        self.inspector_splitter = QSplitter(Qt.Vertical)
+        self.inspector_splitter.setObjectName("inspector_splitter")
+        self.inspector_splitter.setChildrenCollapsible(False)
+        layout.addWidget(self.inspector_splitter, 1)
+
+        # Section 1: compact event fields.
+        self.fields_section = QFrame()
+        self.fields_section.setObjectName("inspector_section")
+        fields_outer = QVBoxLayout(self.fields_section)
+        fields_outer.setContentsMargins(8, 8, 8, 8)
+        fields_outer.setSpacing(6)
+        fields_lbl = QLabel("FIELDS")
+        fields_lbl.setStyleSheet("font-size: 9px; font-weight: bold; color: #8390a5;")
+        fields_outer.addWidget(fields_lbl)
         self.fields_container = QWidget()
         self.fields_layout = QVBoxLayout(self.fields_container)
         self.fields_layout.setContentsMargins(0, 0, 0, 0)
-        self.fields_layout.setSpacing(6)
-        layout.addWidget(self.fields_container)
+        self.fields_layout.setSpacing(4)
+        fields_outer.addWidget(self.fields_container, 1)
+        self.inspector_splitter.addWidget(self.fields_section)
 
-        # Raw Response
-        lbl2 = QLabel("RAW RESPONSE PREVIEW")
-        lbl2.setStyleSheet("font-size: 9px; font-weight: bold; color: #8390a5;")
-        layout.addWidget(lbl2)
+        # Section 2: evaluate box.
+        self.eval_section = QFrame()
+        self.eval_section.setObjectName("inspector_section")
+        eval_outer = QVBoxLayout(self.eval_section)
+        eval_outer.setContentsMargins(8, 8, 8, 8)
+        eval_outer.setSpacing(6)
+        eval_title_row = QHBoxLayout()
+        eval_lbl = QLabel("EVALUATE")
+        eval_lbl.setStyleSheet("font-size: 9px; font-weight: bold; color: #8390a5;")
+        eval_title_row.addWidget(eval_lbl)
+        eval_title_row.addStretch(1)
+        self.eval_add_rule_btn = QPushButton("Save Rule")
+        self.eval_add_rule_btn.setFixedHeight(26)
+        self.eval_add_rule_btn.clicked.connect(self._save_eval_as_rule)
+        eval_title_row.addWidget(self.eval_add_rule_btn)
+        eval_outer.addLayout(eval_title_row)
+
+        self.eval_expr_edit = QLineEdit()
+        self.eval_expr_edit.setPlaceholderText("$.details.status_code | last_message(obj) | path(obj, 'details.messages[-1].content')")
+        self.eval_expr_edit.returnPressed.connect(self._evaluate_current_expression)
+        eval_outer.addWidget(self.eval_expr_edit)
+
+        self.eval_result_box = QTextEdit()
+        self.eval_result_box.setObjectName("raw_json_box")
+        self.eval_result_box.setReadOnly(True)
+        self.eval_result_box.setMinimumHeight(48)
+        eval_outer.addWidget(self.eval_result_box, 1)
+        self.inspector_splitter.addWidget(self.eval_section)
+
+        # Section 3: object/raw tabs. Default tab is object view.
+        self.browser_section = QFrame()
+        self.browser_section.setObjectName("inspector_section")
+        browser_outer = QVBoxLayout(self.browser_section)
+        browser_outer.setContentsMargins(8, 8, 8, 8)
+        browser_outer.setSpacing(6)
+        self.inspector_tabs = QTabWidget()
+
+        self.object_tree = QTreeWidget()
+        self.object_tree.setColumnCount(2)
+        self.object_tree.setHeaderLabels(["Field", "Value"])
+        self.object_tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.object_tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.object_tree.itemDoubleClicked.connect(self._pin_tree_field)
+        self.inspector_tabs.addTab(self.object_tree, "Object View")
 
         self.raw_json_box = QTextEdit()
         self.raw_json_box.setObjectName("raw_json_box")
         self.raw_json_box.setReadOnly(True)
-        layout.addWidget(self.raw_json_box, 1)
+        self.inspector_tabs.addTab(self.raw_json_box, "Raw JSON")
+        self.inspector_tabs.setCurrentIndex(0)
+        browser_outer.addWidget(self.inspector_tabs, 1)
+        self.inspector_splitter.addWidget(self.browser_section)
 
-        # Action Buttons
+        self.inspector_splitter.setSizes([150, 170, 430])
+
         self.action_layout = QHBoxLayout()
         self.action_layout.setSpacing(6)
-        
         self.copy_btn = QPushButton("Copy JSON")
         self.file_ref_btn = QPushButton("Open File Ref")
+        self.copy_btn.clicked.connect(self._copy_selected_json)
         self.action_layout.addWidget(self.copy_btn)
         self.action_layout.addWidget(self.file_ref_btn)
         layout.addLayout(self.action_layout)
@@ -507,13 +812,13 @@ class MainWindow(QMainWindow):
             self.trigger_matrix_widget.hide()
             self.center_tabs.show()
         elif state == "event_detail_inspector":
-            self.sidebar_widget.show()
+            self.sidebar_widget.hide()
             self.inspector_widget.show()
             self.logs_panel.hide()
             self.trigger_matrix_widget.hide()
             self.center_tabs.show()
         else: # main_desktop_timeline
-            self.sidebar_widget.show()
+            self.sidebar_widget.hide()
             self.inspector_widget.show()
             self.logs_panel.show()
             self.trigger_matrix_widget.hide()
@@ -524,10 +829,97 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Event Operations
     # ------------------------------------------------------------------
+    def _filtered_events(self) -> list[EventModel]:
+        events = list(self.model.events)
+        if self._post_filter_categories:
+            events = [event for event in events if event.category in self._post_filter_categories]
+        if self._post_errors_only:
+            events = [event for event in events if event.category == EventCategory.ERROR or event.level.value == "error"]
+        text = self._post_filter_text.strip().casefold()
+        if text:
+            def haystack(event: EventModel) -> str:
+                payload = {
+                    "summary": event.summary,
+                    "type": event.type,
+                    "run_id": event.run_id,
+                    "session_id": event.session_id,
+                    "request_id": event.request_id,
+                    "details": event.details,
+                    "refs": [ref.path for ref in event.refs],
+                }
+                return json.dumps(payload, default=str).casefold()
+            events = [event for event in events if text in haystack(event)]
+        return events
+
+    def _toggle_filter_panel(self) -> None:
+        self._set_filter_panel_visible(not self._filter_panel_visible)
+
+    def _set_filter_panel_visible(self, visible: bool) -> None:
+        self._filter_panel_visible = visible
+        self.filter_btn.setChecked(visible)
+        target_height = 188 if visible else 0
+        if visible:
+            self.filter_panel.show()
+        if self._filter_anim is not None:
+            self._filter_anim.stop()
+        self._filter_anim = QPropertyAnimation(self.filter_panel, b"maximumHeight", self)
+        self._filter_anim.setDuration(180)
+        self._filter_anim.setStartValue(self.filter_panel.maximumHeight())
+        self._filter_anim.setEndValue(target_height)
+        self._filter_anim.setEasingCurve(QEasingCurve.OutCubic)
+        if self._filter_opacity is not None:
+            self._filter_opacity.setOpacity(1.0 if visible else 0.0)
+        if not visible:
+            self._filter_anim.finished.connect(self.filter_panel.hide)
+        self._filter_anim.start()
+
+    def _on_post_filter_changed(self) -> None:
+        self._post_filter_text = self.post_search_edit.text()
+        self._post_errors_only = self.post_errors_only_chk.isChecked()
+        self._post_filter_categories = {
+            category for category, chk in self.post_category_checks.items()
+            if chk.isChecked()
+        }
+        self._rebuild_timeline()
+        self._refresh_controls()
+
+    def _clear_post_filters(self) -> None:
+        self.post_search_edit.blockSignals(True)
+        self.post_errors_only_chk.blockSignals(True)
+        for chk in self.post_category_checks.values():
+            chk.blockSignals(True)
+
+        self.post_search_edit.clear()
+        self.post_errors_only_chk.setChecked(False)
+        for chk in self.post_category_checks.values():
+            chk.setChecked(True)
+
+        self.post_search_edit.blockSignals(False)
+        self.post_errors_only_chk.blockSignals(False)
+        for chk in self.post_category_checks.values():
+            chk.blockSignals(False)
+
+        self._post_filter_text = ""
+        self._post_errors_only = False
+        self._post_filter_categories = set(EventCategory)
+        self._rebuild_timeline()
+        self._refresh_controls()
+
+    def _zoom_in(self) -> None:
+        self.timeline_view.zoom_in()
+
+    def _zoom_out(self) -> None:
+        self.timeline_view.zoom_out()
+
+    def _on_timeline_zoom_changed(self, percent: int) -> None:
+        self._zoom_percent = percent
+        self.zoom_label.setText(f"Zoom {percent}%")
+
     def _rebuild_timeline(self) -> None:
+        visible_events = self._filtered_events()
         self.timeline_view.selected_event_id = self.model.selected_event_id
-        self.timeline_view.populate_events(self.model.events, self.visual_state)
-        self._populate_events_list()
+        self.timeline_view.populate_events(visible_events, self.visual_state)
+        self._populate_events_list(visible_events)
         if self.model.selected_event_id:
             self._sync_event_list_selection(self.model.selected_event_id)
         self._refresh_inspector()
@@ -538,9 +930,9 @@ class MainWindow(QMainWindow):
         self._sync_event_list_selection(event_id)
         self._refresh_inspector()
 
-    def _populate_events_list(self) -> None:
+    def _populate_events_list(self, events: list[EventModel] | None = None) -> None:
         self.event_list.clear()
-        for event in self.model.events:
+        for event in (events if events is not None else self.model.events):
             item = QTreeWidgetItem([
                 event.category.value,
                 event.summary or event.type,
@@ -642,7 +1034,8 @@ class MainWindow(QMainWindow):
     # Actions
     # ------------------------------------------------------------------
     def _on_connect(self) -> None:
-        self.controller.connect(self.url_edit.text().strip(), self.token_edit.text() or None)
+        token = self.token_edit.text().strip() or _env_auth_token() or None
+        self.controller.connect(self.url_edit.text().strip(), token)
         self._refresh_controls()
 
     def _on_start(self) -> None:
@@ -653,6 +1046,8 @@ class MainWindow(QMainWindow):
 
     def _on_stop(self) -> None:
         self._poll_timer.stop()
+        self._timeline_rebuild_timer.stop()
+        self._timeline_rebuild_pending = False
         if self.controller.status.recording_state == RecordingState.RECORDING:
             self.controller.stop_recording()
         self._rebuild_from_controller()
@@ -668,7 +1063,7 @@ class MainWindow(QMainWindow):
             total_new = new_count + max(0, added_via_stream)
             
             if total_new > 0:
-                self._rebuild_from_controller()
+                self._schedule_rebuild_from_controller()
                 self._refresh_controls()
                 return total_new
         except Exception as exc:
@@ -691,6 +1086,18 @@ class MainWindow(QMainWindow):
         )
         if target:
             self.select_event(target)
+
+    def _schedule_rebuild_from_controller(self) -> None:
+        self._timeline_rebuild_pending = True
+        if not self._timeline_rebuild_timer.isActive():
+            self._timeline_rebuild_timer.start()
+
+    def _flush_pending_timeline_rebuild(self) -> None:
+        if not self._timeline_rebuild_pending:
+            return
+        self._timeline_rebuild_pending = False
+        self._rebuild_from_controller()
+        self._refresh_controls()
 
     def _on_save(self) -> None:
         path = self.save_path_provider()
@@ -719,7 +1126,9 @@ class MainWindow(QMainWindow):
         
         conn = "connected" if self.controller.status.connected else "disconnected"
         count = len(self.controller.events)
-        self.status_label.setText(f"{state.value} · {conn} · {count} events")
+        visible = len(self._filtered_events()) if hasattr(self, "post_search_edit") else count
+        filter_suffix = "" if visible == count else f" · {visible} shown"
+        self.status_label.setText(f"{state.value} · {conn} · {count} events{filter_suffix}")
 
         self.rec_state_lbl.setText(state.value)
         self.rec_count_lbl.setText(str(count))
@@ -729,6 +1138,8 @@ class MainWindow(QMainWindow):
         if detail is None:
             self.ins_title.setText("No event selected")
             self.raw_json_box.clear()
+            self.eval_result_box.clear()
+            self._populate_object_tree(None)
             # Clear fields
             for i in reversed(range(self.fields_layout.count())):
                 self.fields_layout.itemAt(i).widget().setParent(None)
@@ -767,6 +1178,116 @@ class MainWindow(QMainWindow):
             self.fields_layout.addWidget(container)
 
         self.raw_json_box.setPlainText(detail.raw_json)
+        self._populate_object_tree(self.model.selected_event)
+        if self.eval_expr_edit.text().strip():
+            self._evaluate_current_expression()
+
+    def _selected_event(self) -> EventModel | None:
+        return self.model.selected_event
+
+    def _evaluate_current_expression(self) -> None:
+        event = self._selected_event()
+        if event is None:
+            self.eval_result_box.setPlainText("unable to evaluate")
+            return
+        result = evaluate_expression(self.eval_expr_edit.text(), event)
+        self.eval_result_box.setPlainText(result.text if result.ok else "unable to evaluate")
+        self._rebuild_timeline()
+
+    def _save_eval_as_rule(self) -> None:
+        event = self._selected_event()
+        expr = self.eval_expr_edit.text().strip()
+        if event is None or not expr:
+            self.eval_result_box.setPlainText("unable to evaluate")
+            return
+        get_rules().append(RenderRule(
+            name=f"Pinned {event.type}",
+            type_pattern=event.type,
+            expression=expr,
+            enabled=True,
+            max_chars=120,
+            pin=True,
+        ))
+        self.eval_result_box.setPlainText("saved render rule")
+        self._refresh_inspector()
+        self._rebuild_timeline()
+
+    def _open_render_settings(self) -> None:
+        dlg = RenderSettingsDialog(self)
+        dlg.exec()
+        self._refresh_inspector()
+        self._rebuild_timeline()
+
+    def _copy_selected_json(self) -> None:
+        detail = self.model.selected_detail()
+        if detail is not None:
+            QApplication.clipboard().setText(detail.raw_json)
+
+    def _populate_object_tree(self, event: EventModel | None) -> None:
+        self.object_tree.clear()
+        if event is None:
+            return
+        pinned_root = QTreeWidgetItem(["📌 pinned", ""])
+        self.object_tree.addTopLevelItem(pinned_root)
+        for label, value in pinned_values_for_event(event):
+            item = QTreeWidgetItem([label, value])
+            item.setData(0, _ID_ROLE, label)
+            pinned_root.addChild(item)
+        pinned_root.setExpanded(True)
+
+        root_payload = event.model_dump(mode="json")
+        obj_root = QTreeWidgetItem(["object", event.type])
+        self.object_tree.addTopLevelItem(obj_root)
+        self._add_object_tree_children(obj_root, root_payload, "$")
+        obj_root.setExpanded(True)
+
+    def _add_object_tree_children(self, parent: QTreeWidgetItem, value: Any, path: str) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_path = f"{path}.{key}" if path != "$" else f"$.{key}"
+                item = QTreeWidgetItem([str(key), self._tree_value_preview(child)])
+                item.setData(0, _ID_ROLE, child_path)
+                parent.addChild(item)
+                if isinstance(child, (dict, list)):
+                    self._add_object_tree_children(item, child, child_path)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                child_path = f"{path}[{index}]"
+                item = QTreeWidgetItem([f"[{index}]", self._tree_value_preview(child)])
+                item.setData(0, _ID_ROLE, child_path)
+                parent.addChild(item)
+                if isinstance(child, (dict, list)):
+                    self._add_object_tree_children(item, child, child_path)
+
+    def _tree_value_preview(self, value: Any) -> str:
+        if value is None:
+            return "null"
+        if isinstance(value, dict):
+            return f"{{{len(value)}}}"
+        if isinstance(value, list):
+            return f"[{len(value)}]"
+        text = str(value).replace("\n", " ")
+        return text if len(text) <= 96 else text[:95] + "…"
+
+    def _pin_tree_field(self, item: QTreeWidgetItem, _column: int) -> None:
+        event = self._selected_event()
+        if event is None:
+            return
+        path_value = item.data(0, _ID_ROLE)
+        if not path_value or not str(path_value).startswith("$"):
+            return
+        expr = str(path_value)
+        self.eval_expr_edit.setText(expr)
+        get_rules().append(RenderRule(
+            name=str(path_value).split(".")[-1],
+            type_pattern=event.type,
+            expression=expr,
+            enabled=True,
+            max_chars=120,
+            pin=True,
+        ))
+        self._evaluate_current_expression()
+        self._refresh_inspector()
 
     def closeEvent(self, event) -> None:
         if getattr(self, "_poll_timer", None) is not None:
@@ -778,7 +1299,6 @@ class MainWindow(QMainWindow):
                 pass
         if hasattr(self, "timeline_view") and self.timeline_view is not None:
             try:
-                self.timeline_view._scene.clear()
                 self.timeline_view.items_map.clear()
                 self.timeline_view.connectors.clear()
             except Exception:

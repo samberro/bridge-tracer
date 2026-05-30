@@ -77,3 +77,4 @@ def test_records_from_a_real_running_bridge(qapp, bridge_server):
     assert w.event_count() == 3
     assert w.controller.events[-1].type == "llm.response"
     w.close()
+    w.deleteLater()

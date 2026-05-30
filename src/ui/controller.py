@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
-from PySide6.QtCore import QObject, QThread, Signal, Qt
+from PySide6.QtCore import QObject, Signal, Qt
 
 from src.bridge_client.client import BridgeClient
 from src.bridge_client.stream import SSEEventSource
@@ -15,66 +17,114 @@ from src.core.schemas import EventModel, RecordingMetadata, RecordingState
 from src.core.storage import RecordingStorage
 
 
-import threading
+def _env_auth_token() -> str | None:
+    token = os.environ.get("AI_BRIDGE_AUTH_TOKEN")
+    if token is None:
+        return None
+    token = token.strip()
+    if not token:
+        return None
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    return token or None
 
-class SSEStreamWorker(QThread):
+
+class SSEStreamWorker(QObject):
+    """SSE stream worker backed by threading.Thread instead of QThread.
+
+    This avoids native PySide/QThread construction crashes on Windows while
+    preserving queued Qt signal delivery into the UI thread.
+    """
+
     event_received = Signal(dict)
     error_occurred = Signal(str)
 
-    def __init__(self, base_url: str, token: str | None = None, *, http_client=None) -> None:
+    def __init__(self, base_url: str, token: str | None = None, *, http_client: Any = None) -> None:
         super().__init__()
         self.base_url = base_url
         self.token = token
         self.http_client = http_client
         self._lock = threading.Lock()
-        self._running = True
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
         self._source = None
 
-    def run(self) -> None:
+    def start(self) -> None:
         with self._lock:
-            if not self._running:
+            if self._thread is not None and self._thread.is_alive():
                 return
-            try:
-                self._source = SSEEventSource(self.base_url, self.token, http_client=self.http_client)
-            except Exception as exc:
-                if self._running:
-                    self.error_occurred.emit(str(exc))
-                return
+            self._stop_event.clear()
+            self._thread = threading.Thread(
+                target=self.run,
+                name="BridgeTracerSSEStreamWorker",
+                daemon=True,
+            )
+            self._thread.start()
 
+    def isRunning(self) -> bool:
+        thread = self._thread
+        return bool(thread is not None and thread.is_alive())
+
+    def run(self) -> None:
         try:
-            with self._source as source:
-                for msg in source:
-                    with self._lock:
-                        if not self._running:
-                            break
-                    if msg.event in ("trace", "snapshot") and msg.data:
-                        try:
-                            data = json.loads(msg.data)
-                            with self._lock:
-                                if not self._running:
-                                    break
-                                if isinstance(data, list):
-                                    for item in data:
-                                        self.event_received.emit(item)
-                                elif isinstance(data, dict):
-                                    self.event_received.emit(data)
-                        except Exception:
-                            pass
+            source = SSEEventSource(
+                self.base_url,
+                self.token,
+                http_client=self.http_client,
+                timeout=1.0,
+            )
+        except TypeError:
+            source = SSEEventSource(
+                self.base_url,
+                self.token,
+                http_client=self.http_client,
+            )
         except Exception as exc:
-            with self._lock:
-                if self._running:
-                    self.error_occurred.emit(str(exc))
+            if not self._stop_event.is_set():
+                self.error_occurred.emit(str(exc))
+            return
+
+        self._source = source
+        try:
+            with source:
+                for msg in source:
+                    if self._stop_event.is_set():
+                        break
+
+                    if msg.event not in ("trace", "snapshot") or not msg.data:
+                        continue
+
+                    try:
+                        data = json.loads(msg.data)
+                    except Exception:
+                        continue
+
+                    if self._stop_event.is_set():
+                        break
+
+                    if isinstance(data, list):
+                        for item in data:
+                            if self._stop_event.is_set():
+                                break
+                            if isinstance(item, dict):
+                                self.event_received.emit(item)
+                    elif isinstance(data, dict):
+                        self.event_received.emit(data)
+
+        except Exception as exc:
+            if not self._stop_event.is_set():
+                self.error_occurred.emit(str(exc))
+        finally:
+            self._source = None
 
     def stop(self) -> None:
-        with self._lock:
-            self._running = False
-            if self._source:
-                try:
-                    self._source.close()
-                except Exception:
-                    pass
-        self.quit()
-        self.wait()
+        self._stop_event.set()
+
+        # Do not close self._source from the GUI thread. Let the worker thread
+        # own and exit its own httpx/SSE stream lifetime.
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=3.0)
 
 
 @dataclass(frozen=True)
@@ -109,6 +159,7 @@ class BridgeTracerController(QObject):
         self._events = list(events)
 
     def connect(self, base_url: str, token: str | None = None) -> ControllerStatus:
+        token = token or _env_auth_token()
         self.disconnect()
         self._client = self._client_factory(base_url, token)
         safe = ""
@@ -159,12 +210,17 @@ class BridgeTracerController(QObject):
             self._seen_ids.add(event.id)
 
     def _stop_stream_worker(self) -> None:
-        if self._worker is not None:
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
             try:
-                self._worker.stop()
+                try:
+                    worker.event_received.disconnect(self._on_stream_event)
+                except Exception:
+                    pass
+                worker.stop()
             except Exception:
                 pass
-            self._worker = None
 
     def start_recording(self) -> None:
         if self._recorder.state == RecordingState.STOPPED:
