@@ -32,18 +32,6 @@ def _evaluate_current_expression_no_rebuild(self) -> None:
     self.eval_result_box.setPlainText(result.text if result.ok else "unable to evaluate")
 
 
-def _on_start_sse_first(self) -> None:
-    if not self.controller.status.connected:
-        self._on_connect()
-    self.controller.start_recording()
-    self._refresh_controls()
-    if getattr(self.controller, "is_log_fallback", False):
-        self._poll_timer.start()
-        self._poll_once()
-    else:
-        self._poll_timer.stop()
-
-
 def _refresh_controls_no_width_jitter(self) -> None:
     state = self.controller.status.recording_state
     self.start_btn.setEnabled(state != RecordingState.RECORDING)
@@ -62,9 +50,11 @@ def _refresh_controls_no_width_jitter(self) -> None:
 
 
 # Patch the active main window module before exporting the class.
+# NOTE: the SSE-first start logic now lives in the base MainWindow._on_start
+# (event-driven refresh; poll timer only in log-fallback mode), so it is no
+# longer patched here.
 _main_window._env_auth_token = _env_at
 _main_window.MainWindow._evaluate_current_expression = _evaluate_current_expression_no_rebuild
-_main_window.MainWindow._on_start = _on_start_sse_first
 _main_window.MainWindow._refresh_controls = _refresh_controls_no_width_jitter
 
 InteractiveTracerWindow = _main_window.MainWindow

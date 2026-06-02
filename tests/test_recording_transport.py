@@ -44,13 +44,17 @@ class FakeSignal:
 class FakeSSEWorker:
     created: list["FakeSSEWorker"] = []
 
-    def __init__(self, base_url: str, token: str | None = None, *, http_client=None) -> None:
+    def __init__(self, base_url: str, at: str | None = None, *, http_client=None,
+                 read_timeout: float = 15.0) -> None:
         self.base_url = base_url
-        self.token = token
+        self.at = at
         self.http_client = http_client
+        self.read_timeout = read_timeout
         self.started = False
         self.stopped = False
         self.event_received = FakeSignal()
+        self.error_occurred = FakeSignal()
+        self.reconnecting = FakeSignal()
         FakeSSEWorker.created.append(self)
 
     def start(self) -> None:
@@ -69,6 +73,9 @@ class FakeTimer:
 
     def start(self) -> None:
         self.started = True
+
+    def stop(self) -> None:
+        self.started = False
 
 
 class DummyWindow:

@@ -19,6 +19,7 @@ elsewhere; this class just enforces the state machine and aggregates events.
 """
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Optional
 
@@ -66,6 +67,11 @@ class Recorder:
         self._on_state_change = on_state_change
         self._on_stop_subscriptions = on_stop_subscriptions
         self._on_post_record = on_post_record
+
+        # Reentrant lock guarding the state machine + event lists, so a feed()
+        # arriving from the SSE worker path can never interleave with stop()'s
+        # check-then-transition (the feed/stop race called out in the plan).
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------------
     # State machine
@@ -115,33 +121,34 @@ class Recorder:
         Malformed events themselves are recorded as a synthetic `parser`
         event by the caller — the recorder doesn't fabricate.
         """
-        if self._state == RecordingState.STOPPED:
-            raise RecorderError("recorder is already stopped")
-        if self._state in (RecordingState.IDLE, RecordingState.FAILED):
-            # The plan says we mustn't lose events that are "already received"
-            # at stop time. Events that arrive before start, or after fail,
-            # are dropped intentionally — the user explicitly asked not to record.
-            return None
+        with self._lock:
+            if self._state == RecordingState.STOPPED:
+                raise RecorderError("recorder is already stopped")
+            if self._state in (RecordingState.IDLE, RecordingState.FAILED):
+                # The plan says we mustn't lose events that are "already received"
+                # at stop time. Events that arrive before start, or after fail,
+                # are dropped intentionally — the user explicitly asked not to record.
+                return None
 
-        event, err = validate_event_dict(raw)
-        if event is None:
-            return None  # caller's responsibility to emit a synthetic parser event
+            event, err = validate_event_dict(raw)
+            if event is None:
+                return None  # caller's responsibility to emit a synthetic parser event
 
-        if self._prefilter is not None and not self._prefilter(event):
-            return None
+            if self._prefilter is not None and not self._prefilter(event):
+                return None
 
-        # During RECORDING events go straight onto the live list. During
-        # STOPPING we buffer until the explicit flush at the end of stop().
-        # The buffer guarantees no event loss between "stop requested" and
-        # "subscriptions actually closed".
-        if self._state == RecordingState.STOPPING:
-            self._buffer.append(event)
-        else:
-            self._events.append(event)
-            if self._on_event:
-                self._on_event(event)
+            # During RECORDING events go straight onto the live list. During
+            # STOPPING we buffer until the explicit flush at the end of stop().
+            # The buffer guarantees no event loss between "stop requested" and
+            # "subscriptions actually closed".
+            if self._state == RecordingState.STOPPING:
+                self._buffer.append(event)
+            else:
+                self._events.append(event)
+                if self._on_event:
+                    self._on_event(event)
 
-        return event
+            return event
 
     def feed_many(self, events: Iterable[Any]) -> int:
         count = 0
@@ -161,48 +168,49 @@ class Recorder:
             5. enter STOPPED
             6. run post-record hook
         """
-        if self._state == RecordingState.IDLE:
-            raise RecorderError("stop() requires RECORDING, current=idle")
-        if self._state == RecordingState.STOPPED:
+        with self._lock:
+            if self._state == RecordingState.IDLE:
+                raise RecorderError("stop() requires RECORDING, current=idle")
+            if self._state == RecordingState.STOPPED:
+                return self._metadata
+            if self._state == RecordingState.FAILED:
+                raise RecorderError("stop() refused: recorder is in FAILED state")
+
+            if self._state == RecordingState.RECORDING:
+                self._transition(RecordingState.STOPPING)
+
+            if self._on_stop_subscriptions is not None:
+                try:
+                    self._on_stop_subscriptions()
+                except Exception:
+                    # Subscription close failure must not lose buffered events.
+                    pass
+
+            # Flush buffered events. Notify on_event for each so downstream
+            # consumers see them too.
+            flushed, self._buffer = self._buffer, []
+            for evt in flushed:
+                self._events.append(evt)
+                if self._on_event:
+                    self._on_event(evt)
+
+            now = datetime.now(timezone.utc)
+            started = self._metadata.started_at
+            duration_ms: float | None = None
+            if started is not None:
+                duration_ms = max(0.0, (now - started).total_seconds() * 1000.0)
+
+            self._metadata = self._metadata.model_copy(update={
+                "stopped_at": now,
+                "duration_ms": duration_ms,
+                "event_count": len(self._events),
+            })
+            self._transition(RecordingState.STOPPED)
+
+            if self._on_post_record is not None:
+                self._on_post_record(self.events)
+
             return self._metadata
-        if self._state == RecordingState.FAILED:
-            raise RecorderError("stop() refused: recorder is in FAILED state")
-
-        if self._state == RecordingState.RECORDING:
-            self._transition(RecordingState.STOPPING)
-
-        if self._on_stop_subscriptions is not None:
-            try:
-                self._on_stop_subscriptions()
-            except Exception:
-                # Subscription close failure must not lose buffered events.
-                pass
-
-        # Flush buffered events. Notify on_event for each so downstream
-        # consumers see them too.
-        flushed, self._buffer = self._buffer, []
-        for evt in flushed:
-            self._events.append(evt)
-            if self._on_event:
-                self._on_event(evt)
-
-        now = datetime.now(timezone.utc)
-        started = self._metadata.started_at
-        duration_ms: float | None = None
-        if started is not None:
-            duration_ms = max(0.0, (now - started).total_seconds() * 1000.0)
-
-        self._metadata = self._metadata.model_copy(update={
-            "stopped_at": now,
-            "duration_ms": duration_ms,
-            "event_count": len(self._events),
-        })
-        self._transition(RecordingState.STOPPED)
-
-        if self._on_post_record is not None:
-            self._on_post_record(self.events)
-
-        return self._metadata
 
     def fail(self, reason: str = "") -> RecordingMetadata:
         """Force a transition to FAILED. Useful when the bridge stream errors

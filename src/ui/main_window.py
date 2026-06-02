@@ -310,6 +310,12 @@ class MainWindow(QMainWindow):
         self._timeline_rebuild_timer.setInterval(125)
         self._timeline_rebuild_timer.timeout.connect(self._flush_pending_timeline_rebuild)
 
+        # Event-driven UI refresh: live SSE ingest (and fallback poll) emit
+        # controller.events_changed, which we turn into a debounced timeline
+        # rebuild. This replaces the poll-timer-as-refresh-clock, so recording
+        # updates the UI live without polling.
+        self.controller.events_changed.connect(self._schedule_rebuild_from_controller)
+
         self._post_filter_text = ""
         self._post_filter_categories: set[EventCategory] = set(EventCategory)
         self._post_errors_only = False
@@ -1082,8 +1088,13 @@ class MainWindow(QMainWindow):
             self._on_connect()
         self.controller.start_recording()
         self._refresh_controls()
-        self._poll_timer.start()
-        self._poll_once()
+        # SSE recording is event-driven (controller.events_changed → debounced
+        # rebuild). The poll timer is started ONLY in explicit log-fallback mode;
+        # we never poll just to refresh the UI.
+        if getattr(self.controller, "is_log_fallback", False):
+            self._poll_timer.start()
+        else:
+            self._poll_timer.stop()
 
     def _on_stop(self) -> None:
         self._poll_timer.stop()

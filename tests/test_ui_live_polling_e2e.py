@@ -60,7 +60,11 @@ def _log(i):
     }
 
 
-def test_records_from_a_real_running_bridge(qapp, bridge_server):
+def test_records_from_a_real_running_bridge(qapp, bridge_server, monkeypatch):
+    # This bridge only serves /logs (404 on /trace/events), so it is the
+    # log-polling fallback path. UI refresh is event-driven, so we tick a poll
+    # and flush the debounced rebuild to observe the model.
+    monkeypatch.setenv("AI_BRIDGE_RECORDING_FALLBACK", "logs")
     server, events = bridge_server
     port = server.server_address[1]
     events.extend([_log(1), _log(2)])
@@ -69,11 +73,14 @@ def test_records_from_a_real_running_bridge(qapp, bridge_server):
     ctrl.connect(f"http://127.0.0.1:{port}", "dev-token")
     w = InteractiveTracerWindow(events=[], controller=ctrl)
 
-    w.start_btn.click()  # real click -> real HTTP poll of /logs
+    w.start_btn.click()  # starts recording + fallback poll timer
+    assert w.poll_once() == 2  # real HTTP poll of /logs over a socket
+    w._flush_pending_timeline_rebuild()
     assert w.event_count() == 2
 
     events.append(_log(3))  # bridge emits another event
-    w.poll_once()
+    assert w.poll_once() == 1
+    w._flush_pending_timeline_rebuild()
     assert w.event_count() == 3
     assert w.controller.events[-1].type == "llm.response"
     w.close()
