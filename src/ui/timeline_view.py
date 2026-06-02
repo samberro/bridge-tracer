@@ -5,7 +5,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Iterable
 
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QEasingCurve, QObject, QPointF, QPropertyAnimation, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QGraphicsItem,
@@ -158,6 +158,98 @@ class EventCardItem(QGraphicsObject):
         return value if len(value) <= limit else value[: max(0, limit - 1)] + "…"
 
 
+class CollectionCardItem(QGraphicsObject):
+    """A single card standing in for a dense burst of same-lane events.
+
+    Renders a stacked-paper motif with a count badge, a category-mix chip row,
+    and error precedence (any error in the group shows red). Clicking it asks
+    the view to fan the group out into individual cards.
+    """
+
+    clicked = Signal(str)
+
+    def __init__(self, group_id: str, events: list[EventModel], width: float = 184.0,
+                 height: float = 58.0, parent: QGraphicsItem | None = None) -> None:
+        super().__init__(parent)
+        self.group_id = group_id
+        self.events = events
+        self.width = width
+        self.height = height
+        self.category = events[0].category
+        self.count = len(events)
+        self.has_error = any(
+            e.category == EventCategory.ERROR or e.level == EventLevel.ERROR for e in events
+        )
+        self._chip_categories: list[EventCategory] = []
+        for e in events:
+            if e.category not in self._chip_categories:
+                self._chip_categories.append(e.category)
+        self.setAcceptHoverEvents(True)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setToolTip(f"{self.count} {self.category.value} events — click to expand")
+
+    def boundingRect(self) -> QRectF:
+        return QRectF(-12, -16, self.width + 24, self.height + 30)
+
+    def paint(self, painter: QPainter, option: QStyleOptionGraphicsItem, widget: QWidget | None = None) -> None:
+        color = QColor(CATEGORY_COLORS.get(self.category, "#9aa4b2"))
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        # Stacked-paper ghosts behind the front card.
+        for off, shade in ((8.0, "#0a1322"), (4.0, "#0b1526")):
+            painter.setPen(QPen(QColor(BORDER), 1.0))
+            painter.setBrush(QBrush(QColor(shade)))
+            painter.drawRoundedRect(QRectF(off, -off, self.width, self.height), 11, 11)
+
+        edge = QColor("#ef4444") if self.has_error else color
+        painter.setPen(QPen(edge, 1.4))
+        painter.setBrush(QBrush(QColor("#0d1728")))
+        painter.drawRoundedRect(QRectF(0, 0, self.width, self.height), 11, 11)
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(color))
+        painter.drawRoundedRect(QRectF(0, 0, 5, self.height), 3, 3)
+        painter.drawEllipse(QRectF(14, 12, 8, 8))
+
+        font = QFont("Segoe UI", 9)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor(TEXT))
+        painter.drawText(QRectF(30, 5, self.width - 78, 20), Qt.AlignLeft | Qt.AlignVCenter,
+                         f"{self.category.value} group")
+
+        # Count badge, top-right.
+        badge_w = 38.0
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor("#1b2940")))
+        painter.drawRoundedRect(QRectF(self.width - badge_w - 8, 7, badge_w, 16), 8, 8)
+        painter.setPen(QColor(TEXT))
+        painter.setFont(QFont("Segoe UI", 8))
+        painter.drawText(QRectF(self.width - badge_w - 8, 7, badge_w, 16), Qt.AlignCenter, f"+{self.count}")
+
+        # Category-mix chip row along the bottom.
+        painter.setPen(Qt.NoPen)
+        cx = 30.0
+        for c in self._chip_categories[:6]:
+            painter.setBrush(QBrush(QColor(CATEGORY_COLORS.get(c, "#9aa4b2"))))
+            painter.drawEllipse(QRectF(cx, self.height - 15, 7, 7))
+            cx += 11.0
+
+        painter.setPen(QColor(TEXT_DIM))
+        painter.setFont(QFont("Segoe UI", 7))
+        painter.drawText(QRectF(30, self.height - 17, self.width - 40, 12),
+                         Qt.AlignRight | Qt.AlignVCenter, "click to expand")
+
+        if self.has_error:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor("#ef4444")))
+            painter.drawEllipse(QRectF(self.width - 16, self.height - 16, 9, 9))
+
+    def mouseReleaseEvent(self, evt) -> None:
+        self.clicked.emit(self.group_id)
+        super().mouseReleaseEvent(evt)
+
+
 class ConnectorItem(QGraphicsObject):
     def __init__(self, start_pos: QPointF, end_pos: QPointF, *, color: str = "#465674", dashed: bool = False,
                  parent: QGraphicsItem | None = None) -> None:
@@ -229,6 +321,11 @@ class TimelineView(QGraphicsView):
     event_selected = Signal(str)
     zoom_changed = Signal(int)
 
+    # A same-lane run of >= COLLAPSE_MIN consecutive events collapses into a
+    # single collection card (until the user expands it).
+    COLLAPSE_MIN = 5
+    COLLECTION_WIDTH = 184.0
+
     def __init__(self, parent: QWidget | None = None) -> None:
         self._lane_y: dict[EventCategory, float] = {}
         self._lane_counts: dict[EventCategory, int] = {}
@@ -251,6 +348,14 @@ class TimelineView(QGraphicsView):
         # "fit" = collision-aware/gap-compressed (default, readable at volume);
         # "time" = raw wall-clock spacing.
         self._axis_mode = "fit"
+        # Collection-card (burst collapse) state.
+        self._expanded_groups: set[str] = set()
+        self.collection_items: dict[str, CollectionCardItem] = {}
+        self._member_group: dict[str, str] = {}
+        self._last_events: list[EventModel] = []
+        self._last_visual_state = "main_desktop_timeline"
+        self._fanout_anims: list = []
+        self._pending_fanout: tuple[str, float] | None = None
 
     def set_axis_mode(self, mode: str) -> None:
         if mode not in ("fit", "time") or mode == self._axis_mode:
@@ -326,12 +431,16 @@ class TimelineView(QGraphicsView):
         self.setUpdatesEnabled(False)
         old_scene = self._scene
         try:
+            self._last_events = list(events)
+            self._last_visual_state = visual_state
             lane_order = self._active_lanes(events)
             self._lane_y = {cat: 88.0 + i * 86.0 for i, cat in enumerate(lane_order)}
             self._lane_counts = {cat: sum(1 for event in events if event.category == cat) for cat in lane_order}
             self._scene = TimelineScene(self._lane_y, self._lane_counts, self)
             self.setScene(self._scene)
             self.items_map = {}
+            self.collection_items = {}
+            self._member_group = {}
             self.connectors = []
             if old_scene is not None:
                 old_scene.deleteLater()
@@ -340,27 +449,104 @@ class TimelineView(QGraphicsView):
                 self._scene.setSceneRect(0, 0, 900, 420)
                 return
 
-            positions, widths = self._layout_events(events, lane_order, visual_state)
-            max_x = max((x + widths.get(event_id, 176) for event_id, (x, _y) in positions.items()), default=900)
+            sorted_events = sorted(events, key=lambda e: e.timestamp)
+            dense = visual_state == "timeline_filmstrip_focused" or len(sorted_events) > 80
+            if getattr(self, "_axis_mode", "fit") == "time":
+                units: list[tuple[str, object]] = [("event", e) for e in sorted_events]
+            else:
+                units = self._build_units(sorted_events)
+
+            # Lay out one column per unit (event card or collection card).
+            pack_items: list[dict] = []
+            for kind, payload in units:
+                if kind == "event":
+                    e = payload  # type: ignore[assignment]
+                    pack_items.append({"key": ("e", e.id), "category": e.category,
+                                       "width": self._card_width(e, dense), "ts": e.timestamp})
+                else:
+                    run = payload  # type: ignore[assignment]
+                    pack_items.append({"key": ("g", self._group_id(run)), "category": run[0].category,
+                                       "width": self.COLLECTION_WIDTH, "ts": run[0].timestamp})
+            xs = self._pack(pack_items, dense)
+
+            max_x = max((xs[it["key"]] + it["width"] for it in pack_items), default=900)
             max_y = max(self._lane_y.values(), default=300) + 72
             self._scene.setSceneRect(0, 0, max(980, max_x + 180), max(420, max_y))
 
-            for event in events:
-                x, y = positions[event.id]
-                item = EventCardItem(event, width=widths.get(event.id, 176), height=58)
-                item.setPos(x, y)
-                item.clicked.connect(self._on_card_clicked)
-                self._scene.addItem(item)
-                self.items_map[event.id] = item
+            for kind, payload in units:
+                if kind == "event":
+                    e = payload  # type: ignore[assignment]
+                    lane_y = self._lane_y.get(e.category, 240.0)
+                    item = EventCardItem(e, width=self._card_width(e, dense), height=58)
+                    item.setPos(xs[("e", e.id)], lane_y - 29.0 + self._lane_offset(e))
+                    item.clicked.connect(self._on_card_clicked)
+                    self._scene.addItem(item)
+                    self.items_map[e.id] = item
+                else:
+                    run = payload  # type: ignore[assignment]
+                    gid = self._group_id(run)
+                    lane_y = self._lane_y.get(run[0].category, 240.0)
+                    col = CollectionCardItem(gid, run, width=self.COLLECTION_WIDTH, height=58)
+                    col.setPos(xs[("g", gid)], lane_y - 29.0)
+                    col.clicked.connect(self._on_collection_clicked)
+                    self._scene.addItem(col)
+                    self.collection_items[gid] = col
+                    for e in run:
+                        self._member_group[e.id] = gid
 
             self._create_connectors(events)
             self.set_selected_event(self.selected_event_id)
+            self._run_pending_fanout()
         finally:
             self.setUpdatesEnabled(True)
             self.viewport().update()
 
     def _on_card_clicked(self, event_id: str) -> None:
         self.event_selected.emit(event_id)
+
+    def _on_collection_clicked(self, group_id: str) -> None:
+        """Expand a collapsed burst into its individual cards (with a fan-out)."""
+        col = self.collection_items.get(group_id)
+        anchor_x = col.pos().x() if col is not None else 155.0
+        member_ids = [e.id for e in col.events] if col is not None else []
+        self._expanded_groups.add(group_id)
+        self._pending_fanout = (group_id, anchor_x, member_ids)
+        self.populate_events(self._last_events, self._last_visual_state)
+
+    def collapse_all_groups(self) -> None:
+        """Re-collapse every expanded burst."""
+        if not self._expanded_groups:
+            return
+        self._expanded_groups.clear()
+        self.populate_events(self._last_events, self._last_visual_state)
+
+    def _run_pending_fanout(self) -> None:
+        pending = self._pending_fanout
+        self._pending_fanout = None
+        if not pending:
+            return
+        _gid, anchor_x, member_ids = pending
+        self._fanout_anims = []
+        for eid in member_ids:
+            item = self.items_map.get(eid)
+            if item is None:
+                continue
+            target = QPointF(item.pos())
+            item.setOpacity(0.0)
+            item.setPos(anchor_x, target.y())
+            pos_anim = QPropertyAnimation(item, b"pos", self)
+            pos_anim.setDuration(200)
+            pos_anim.setStartValue(QPointF(anchor_x, target.y()))
+            pos_anim.setEndValue(target)
+            pos_anim.setEasingCurve(QEasingCurve.OutCubic)
+            op_anim = QPropertyAnimation(item, b"opacity", self)
+            op_anim.setDuration(180)
+            op_anim.setStartValue(0.0)
+            op_anim.setEndValue(1.0)
+            pos_anim.start()
+            op_anim.start()
+            self._fanout_anims.append(pos_anim)
+            self._fanout_anims.append(op_anim)
 
     def _active_lanes(self, events: Iterable[EventModel]) -> list[EventCategory]:
         present = {event.category for event in events}
@@ -389,40 +575,71 @@ class TimelineView(QGraphicsView):
         if getattr(self, "_axis_mode", "fit") == "time":
             return self._layout_events_time(sorted_events, dense, base_x)
 
+        widths: dict[str, float] = {event.id: self._card_width(event, dense) for event in sorted_events}
+        items = [
+            {"key": event.id, "category": event.category, "width": widths[event.id], "ts": event.timestamp}
+            for event in sorted_events
+        ]
+        xs = self._pack(items, dense, base_x)
         positions: dict[str, tuple[float, float]] = {}
-        widths: dict[str, float] = {}
-        # Spacing knobs. min_step guarantees forward progress (and, with the
-        # per-lane guard below, no overlap); max_gap caps idle stretches;
-        # px_per_second gives a gentle time-proportional feel within bursts.
+        for event in sorted_events:
+            lane_y = self._lane_y.get(event.category, 240.0)
+            positions[event.id] = (xs[event.id], lane_y - 29.0 + self._lane_offset(event))
+        return positions, widths
+
+    def _pack(self, items: list[dict], dense: bool, base_x: float = 155.0) -> dict:
+        """Place a chronological sequence of items (each a dict with key /
+        category / width / ts) left-to-right with collision-aware, gap-
+        compressed spacing. Returns {key: x}. Shared by event and collection
+        (unit) layout so both stay consistent and prefix-stable.
+        """
         min_step = 132.0 if dense else 168.0
         max_gap = 240.0 if dense else 300.0
         px_per_second = 26.0
         lane_gap = 18.0
-
+        xs: dict = {}
         cursor_x = base_x
         lane_right: dict[EventCategory, float] = {}
         prev_ts: datetime | None = None
-
-        for event in sorted_events:
+        for it in items:
+            ts = it["ts"]
             if prev_ts is not None:
-                dt = (event.timestamp - prev_ts).total_seconds()
-                cursor_x += max(min_step, min(max_gap, dt * px_per_second))
-            prev_ts = event.timestamp
-
-            width = self._card_width(event, dense)
+                cursor_x += max(min_step, min(max_gap, (ts - prev_ts).total_seconds() * px_per_second))
+            prev_ts = ts
             x = cursor_x
-            # Never overlap a previous card in the same lane.
-            right = lane_right.get(event.category)
+            cat = it["category"]
+            right = lane_right.get(cat)
             if right is not None and x < right + lane_gap:
                 x = right + lane_gap
                 cursor_x = x  # keep the global cursor monotonic past the bump
-            lane_right[event.category] = x + width
+            lane_right[cat] = x + it["width"]
+            xs[it["key"]] = x
+        return xs
 
-            widths[event.id] = width
-            lane_y = self._lane_y.get(event.category, 240.0)
-            positions[event.id] = (x, lane_y - 29.0 + self._lane_offset(event))
+    def _group_id(self, run: list[EventModel]) -> str:
+        return f"grp_{run[0].id}_{len(run)}"
 
-        return positions, widths
+    def _build_units(self, sorted_events: list[EventModel]) -> list[tuple[str, object]]:
+        """Collapse same-lane bursts into groups. Returns a chronological list
+        of units: ("event", EventModel) or ("group", list[EventModel]). A run
+        of >= COLLAPSE_MIN consecutive same-category events becomes a group,
+        unless the user has explicitly expanded it.
+        """
+        units: list[tuple[str, object]] = []
+        i = 0
+        n = len(sorted_events)
+        while i < n:
+            cat = sorted_events[i].category
+            j = i + 1
+            while j < n and sorted_events[j].category == cat:
+                j += 1
+            run = sorted_events[i:j]
+            if len(run) >= self.COLLAPSE_MIN and self._group_id(run) not in self._expanded_groups:
+                units.append(("group", run))
+            else:
+                units.extend(("event", e) for e in run)
+            i = j
+        return units
 
     def _layout_events_time(self, sorted_events: list[EventModel], dense: bool, base_x: float) -> tuple[dict[str, tuple[float, float]], dict[str, float]]:
         """Legacy raw wall-clock layout (``axis_mode == 'time'``)."""

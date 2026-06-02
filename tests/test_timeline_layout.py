@@ -53,6 +53,39 @@ def test_fit_layout_has_no_overlap_and_bounded_gaps() -> None:
     assert max_gap < 400, f"idle gap not compressed: {max_gap}"
 
 
+def test_dense_burst_collapses_into_one_collection_card() -> None:
+    view = TimelineView()
+    events = [_event(f"b{i}", i) for i in range(12)]  # 12 consecutive HTTP events
+    view.populate_events(events, "main_desktop_timeline")
+    assert len(view.collection_items) == 1
+    assert len(view.items_map) == 0  # individuals are hidden while collapsed
+    col = next(iter(view.collection_items.values()))
+    assert col.count == 12
+
+
+def test_expanding_collection_reveals_individuals_then_collapses() -> None:
+    view = TimelineView()
+    events = [_event(f"b{i}", i) for i in range(12)]
+    view.populate_events(events, "main_desktop_timeline")
+    gid = next(iter(view.collection_items))
+
+    view._on_collection_clicked(gid)  # fan out
+    assert len(view.items_map) == 12
+    assert len(view.collection_items) == 0
+
+    view.collapse_all_groups()  # re-collapse
+    assert len(view.collection_items) == 1
+    assert len(view.items_map) == 0
+
+
+def test_short_runs_are_not_collapsed() -> None:
+    view = TimelineView()
+    events = [_event(f"s{i}", i) for i in range(3)]  # below COLLAPSE_MIN
+    view.populate_events(events, "main_desktop_timeline")
+    assert len(view.collection_items) == 0
+    assert len(view.items_map) == 3
+
+
 def test_selecting_event_does_not_force_scroll_on_rebuild(monkeypatch) -> None:
     view = TimelineView()
     calls = []
