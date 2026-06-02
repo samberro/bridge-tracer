@@ -48,12 +48,24 @@ class EventCardItem(QGraphicsObject):
         self._selected = False
         self.setAcceptHoverEvents(True)
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
-        self.setToolTip(self._tooltip_text())
+        # Compute display text ONCE. title_for_event / preview_for_event run the
+        # render-rule engine and expand JSON payloads, which must never happen
+        # inside paint() (called many times per card on scroll/zoom).
+        self._title_text = title_for_event(event_model)
+        self._subtitle_text = self._compute_subtitle()
+        self.setToolTip(self._compute_tooltip())
 
     def set_selected(self, selected: bool) -> None:
         if self._selected != selected:
             self._selected = selected
             self.update()
+
+    def invalidate_text(self) -> None:
+        """Recompute cached display text (e.g. after a render-rule change)."""
+        self._title_text = title_for_event(self.event_model)
+        self._subtitle_text = self._compute_subtitle()
+        self.setToolTip(self._compute_tooltip())
+        self.update()
 
     def boundingRect(self) -> QRectF:
         return QRectF(-12, -12, self.width + 24, self.height + 24)
@@ -85,12 +97,12 @@ class EventCardItem(QGraphicsObject):
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(QColor(TEXT))
-        painter.drawText(QRectF(30, 6, self.width - 40, 21), Qt.AlignLeft | Qt.AlignVCenter, self._elide(title_for_event(event), 38))
+        painter.drawText(QRectF(30, 6, self.width - 40, 21), Qt.AlignLeft | Qt.AlignVCenter, self._elide(self._title_text, 38))
 
         font_sub = QFont("Segoe UI", 8)
         painter.setFont(font_sub)
         painter.setPen(QColor(TEXT_MUTED))
-        painter.drawText(QRectF(30, 29, self.width - 40, 19), Qt.AlignLeft | Qt.AlignVCenter, self._elide(self._subtitle(), 44))
+        painter.drawText(QRectF(30, 29, self.width - 40, 19), Qt.AlignLeft | Qt.AlignVCenter, self._elide(self._subtitle_text, 44))
 
         if is_error:
             painter.setPen(Qt.NoPen)
@@ -103,7 +115,7 @@ class EventCardItem(QGraphicsObject):
         self.clicked.emit(self.event_model.id)
         super().mouseReleaseEvent(evt)
 
-    def _subtitle(self) -> str:
+    def _compute_subtitle(self) -> str:
         event = self.event_model
         rendered = preview_for_event(event, max_chars=72)
         if rendered and rendered not in ("unable to evaluate", "null"):
@@ -129,7 +141,7 @@ class EventCardItem(QGraphicsObject):
             return str(details.get("message") or details.get("error") or event.type)[:42]
         return event.type
 
-    def _tooltip_text(self) -> str:
+    def _compute_tooltip(self) -> str:
         event = self.event_model
         return "\n".join([
             event.summary or event.type,
@@ -236,6 +248,30 @@ class TimelineView(QGraphicsView):
         self.items_map: dict[str, EventCardItem] = {}
         self.connectors: list[ConnectorItem] = []
         self._zoom_percent = 100
+        # "fit" = collision-aware/gap-compressed (default, readable at volume);
+        # "time" = raw wall-clock spacing.
+        self._axis_mode = "fit"
+
+    def set_axis_mode(self, mode: str) -> None:
+        if mode not in ("fit", "time") or mode == self._axis_mode:
+            return
+        self._axis_mode = mode
+
+    def axis_mode(self) -> str:
+        return self._axis_mode
+
+    def fit_to_events(self) -> None:
+        """Zoom/scroll so every event card is visible at once."""
+        if not self.items_map:
+            return
+        rect = self._scene.itemsBoundingRect()
+        if rect.isEmpty():
+            return
+        self.fitInView(rect.adjusted(-40, -40, 40, 40), Qt.KeepAspectRatio)
+        # Reflect the resulting scale back into the zoom indicator.
+        scale = self.transform().m11()
+        self._zoom_percent = max(35, min(220, int(round(scale * 100))))
+        self.zoom_changed.emit(self._zoom_percent)
 
     def set_zoom_percent(self, percent: int) -> None:
         percent = max(35, min(220, int(percent)))
@@ -335,32 +371,80 @@ class TimelineView(QGraphicsView):
         return ordered or [EventCategory.HTTP, EventCategory.LLM, EventCategory.TOOL, EventCategory.FILE, EventCategory.ERROR]
 
     def _layout_events(self, events: list[EventModel], lane_order: list[EventCategory], visual_state: str) -> tuple[dict[str, tuple[float, float]], dict[str, float]]:
+        """Collision-aware, gap-compressed timeline layout (the "fit" axis).
+
+        Cards are placed left-to-right in chronological order with a global
+        cursor that (a) never lets two cards in the same lane overlap and
+        (b) caps idle gaps, so dense bursts stay readable and quiet periods
+        don't blow the canvas into a sparse void. The scan is prefix-stable:
+        an event's position depends only on the events before it, so appending
+        new events never shifts existing ones. Real timestamps live in the
+        tooltip/inspector. ``self._axis_mode == 'time'`` restores raw
+        wall-clock spacing.
+        """
         sorted_events = sorted(events, key=lambda e: e.timestamp)
+        dense = visual_state == "timeline_filmstrip_focused" or len(sorted_events) > 80
+        base_x = 155.0
+
+        if getattr(self, "_axis_mode", "fit") == "time":
+            return self._layout_events_time(sorted_events, dense, base_x)
+
+        positions: dict[str, tuple[float, float]] = {}
+        widths: dict[str, float] = {}
+        # Spacing knobs. min_step guarantees forward progress (and, with the
+        # per-lane guard below, no overlap); max_gap caps idle stretches;
+        # px_per_second gives a gentle time-proportional feel within bursts.
+        min_step = 132.0 if dense else 168.0
+        max_gap = 240.0 if dense else 300.0
+        px_per_second = 26.0
+        lane_gap = 18.0
+
+        cursor_x = base_x
+        lane_right: dict[EventCategory, float] = {}
+        prev_ts: datetime | None = None
+
+        for event in sorted_events:
+            if prev_ts is not None:
+                dt = (event.timestamp - prev_ts).total_seconds()
+                cursor_x += max(min_step, min(max_gap, dt * px_per_second))
+            prev_ts = event.timestamp
+
+            width = self._card_width(event, dense)
+            x = cursor_x
+            # Never overlap a previous card in the same lane.
+            right = lane_right.get(event.category)
+            if right is not None and x < right + lane_gap:
+                x = right + lane_gap
+                cursor_x = x  # keep the global cursor monotonic past the bump
+            lane_right[event.category] = x + width
+
+            widths[event.id] = width
+            lane_y = self._lane_y.get(event.category, 240.0)
+            positions[event.id] = (x, lane_y - 29.0 + self._lane_offset(event))
+
+        return positions, widths
+
+    def _layout_events_time(self, sorted_events: list[EventModel], dense: bool, base_x: float) -> tuple[dict[str, tuple[float, float]], dict[str, float]]:
+        """Legacy raw wall-clock layout (``axis_mode == 'time'``)."""
         lane_slots: dict[EventCategory, int] = defaultdict(int)
         positions: dict[str, tuple[float, float]] = {}
         widths: dict[str, float] = {}
         min_ts = min(event.timestamp for event in sorted_events)
         max_ts = max(event.timestamp for event in sorted_events)
         total = max(0.001, (max_ts - min_ts).total_seconds())
-        dense = visual_state == "timeline_filmstrip_focused" or len(sorted_events) > 80
         px_per_second = max(22.0, min(190.0, 980.0 / total)) if total > 0.001 else 160.0
-        base_x = 155.0
 
         for event in sorted_events:
             lane_y = self._lane_y.get(event.category, 240.0)
             slot = lane_slots[event.category]
             elapsed = (event.timestamp - min_ts).total_seconds()
             x = base_x + elapsed * px_per_second
-
-            # Enforce minimum spacing inside a lane so same-timestamp events become a filmstrip.
             min_x = base_x + slot * (132 if dense else 190)
             x = max(x, min_x)
             lane_slots[event.category] += 1
-
             width = self._card_width(event, dense)
             widths[event.id] = width
-            y_offset = self._lane_offset(event)
-            positions[event.id] = (x, lane_y - 29.0 + y_offset)
+            positions[event.id] = (x, lane_y - 29.0 + self._lane_offset(event))
 
         return positions, widths
 
