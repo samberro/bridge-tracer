@@ -53,13 +53,15 @@ def capture_config_screenshots(*, config_path: Path, project_root: Path | None =
         window = BridgeTracerWindow(
             events=build_sample_events(),
             visual_state=state,
-            use_mockup_backdrop=True,
         )
         window.resize(1440, 900)
         window.show()
         app.processEvents()
-        window.capture(output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        window.grab().save(str(output))
         window.close()
+        window.deleteLater()
+        app.processEvents()
         written.append(output)
     return written
 

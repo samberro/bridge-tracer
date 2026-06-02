@@ -30,6 +30,9 @@ def _log(i):
 
 def _controller_for(box):
     def handler(request: httpx.Request) -> httpx.Response:
+        # 404 on /trace/events forces the log-polling fallback path (no SSE).
+        if request.url.path == "/trace/events":
+            return httpx.Response(404)
         return httpx.Response(200, json={"events": list(box)})
 
     def factory(*_a, **_k):
@@ -40,31 +43,40 @@ def _controller_for(box):
     return BridgeTracerController(client_factory=factory)
 
 
-def test_start_ingests_live_bridge_events_into_timeline(qapp):
+def test_start_ingests_live_bridge_events_into_timeline(qapp, monkeypatch):
+    # Log-polling fallback (SSE unavailable). UI refresh is event-driven, so we
+    # tick a poll and flush the debounced rebuild to observe the model.
+    monkeypatch.setenv("AI_BRIDGE_RECORDING_FALLBACK", "logs")
     box = [_log(1), _log(2)]
     ctrl = _controller_for(box)
     ctrl.connect("http://bridge.test", "t")
     w = InteractiveTracerWindow(events=[], controller=ctrl)
     assert w.event_count() == 0
 
-    w.start_btn.click()  # starts recording + immediate poll
+    w.start_btn.click()  # starts recording + fallback poll timer (no sync poll)
     assert ctrl.status.recording_state == RecordingState.RECORDING
+    assert w.poll_once() == 2  # a timer tick ingests the two log events
+    w._flush_pending_timeline_rebuild()
     assert w.event_count() == 2  # live events showed up in the list
 
     box.append(_log(3))      # a new bridge event arrives
-    w.poll_once()
+    assert w.poll_once() == 1
+    w._flush_pending_timeline_rebuild()
     assert w.event_count() == 3
     assert "3 events" in w.status_label.text()
     w.close()
     w.deleteLater()
 
 
-def test_stop_halts_polling(qapp):
+def test_stop_halts_polling(qapp, monkeypatch):
+    monkeypatch.setenv("AI_BRIDGE_RECORDING_FALLBACK", "logs")
     box = [_log(1)]
     ctrl = _controller_for(box)
     ctrl.connect("http://bridge.test", "t")
     w = InteractiveTracerWindow(events=[], controller=ctrl)
     w.start_btn.click()
+    assert w.poll_once() == 1
+    w._flush_pending_timeline_rebuild()
     assert w.event_count() == 1
     w.stop_btn.click()
     assert ctrl.status.recording_state == RecordingState.STOPPED
@@ -76,9 +88,13 @@ def test_stop_halts_polling(qapp):
     w.deleteLater()
 
 
-def test_poll_error_surfaces_and_stops_timer(qapp):
+def test_poll_error_surfaces_and_stops_timer(qapp, monkeypatch):
+    monkeypatch.setenv("AI_BRIDGE_RECORDING_FALLBACK", "logs")
+
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(401, text="nope")
+        if request.url.path == "/trace/events":
+            return httpx.Response(404)  # force fallback polling
+        return httpx.Response(401, text="nope")  # /logs auth failure
 
     def factory(*_a, **_k):
         from src.bridge_client.client import BridgeClient
@@ -88,7 +104,8 @@ def test_poll_error_surfaces_and_stops_timer(qapp):
     ctrl = BridgeTracerController(client_factory=factory)
     ctrl.connect("http://bridge.test", "bad")
     w = InteractiveTracerWindow(events=[], controller=ctrl)
-    w.start_btn.click()  # poll hits 401
+    w.start_btn.click()
+    w.poll_once()  # poll hits 401 on /logs
     assert "error" in w.status_label.text().lower()
     assert not w._poll_timer.isActive()
     w.close()

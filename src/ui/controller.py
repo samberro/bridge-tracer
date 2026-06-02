@@ -7,9 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+import httpx
 from PySide6.QtCore import QObject, Signal, Qt
 
-from src.bridge_client.client import BridgeClient
+from src.bridge_client.client import BridgeClient, BridgeAPIError
 from src.bridge_client.stream import SSEEventSource
 from src.core.bridge_log import map_log_event
 from src.core.recorder import Recorder
@@ -43,12 +44,21 @@ def _log_fallback_enabled() -> bool:
 class SSEStreamWorker(QObject):
     event_received = Signal(dict)
     error_occurred = Signal(str)
+    # Emitted with the attempt number when a transient drop/idle triggers a
+    # reconnect, so the UI can show a quiet "reconnecting" state.
+    reconnecting = Signal(int)
 
-    def __init__(self, base_url: str, at: str | None = None, *, http_client: Any = None) -> None:
+    def __init__(self, base_url: str, at: str | None = None, *, http_client: Any = None,
+                 read_timeout: float = 15.0) -> None:
         super().__init__()
         self.base_url = base_url
         self.at = at
         self.http_client = http_client
+        # Read timeout governs how long a quiet stream waits before we treat it
+        # as an idle gap and reconnect. Must be long enough that normal idle
+        # periods (with bridge keepalives) do not churn, short enough that
+        # stop() stays responsive.
+        self._read_timeout = read_timeout
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -70,57 +80,107 @@ class SSEStreamWorker(QObject):
         thread = self._thread
         return bool(thread is not None and thread.is_alive())
 
-    def run(self) -> None:
+    def _open_source(self) -> SSEEventSource:
         try:
-            source = SSEEventSource(
+            return SSEEventSource(
                 self.base_url,
                 self.at,
                 http_client=self.http_client,
-                timeout=1.0,
+                timeout=self._read_timeout,
             )
         except TypeError:
-            source = SSEEventSource(
+            # Older SSEEventSource signature without a timeout kwarg.
+            return SSEEventSource(
                 self.base_url,
                 self.at,
                 http_client=self.http_client,
             )
-        except Exception as exc:
-            if not self._stop_event.is_set():
-                self.error_occurred.emit(str(exc))
+
+    def _handle_message(self, msg: Any) -> None:
+        if msg.event not in ("trace", "snapshot") or not msg.data:
             return
-
-        self._source = source
         try:
-            with source:
-                for msg in source:
-                    if self._stop_event.is_set():
-                        break
+            data = json.loads(msg.data)
+        except Exception:
+            return
+        if self._stop_event.is_set():
+            return
+        if isinstance(data, list):
+            for item in data:
+                if self._stop_event.is_set():
+                    break
+                if isinstance(item, dict):
+                    self.event_received.emit(item)
+        elif isinstance(data, dict):
+            self.event_received.emit(data)
 
-                    if msg.event not in ("trace", "snapshot") or not msg.data:
-                        continue
+    def run(self) -> None:
+        """Stream events resiliently.
 
-                    try:
-                        data = json.loads(msg.data)
-                    except Exception:
-                        continue
+        A read timeout or clean server-side close is treated as a *transient*
+        idle/disconnect and triggers a reconnect with exponential backoff (the
+        bridge re-sends its snapshot; the controller de-dupes by id, so no
+        duplicates surface). Only an explicit stop or a fatal HTTP error (4xx/
+        5xx on open) ends the worker. This replaces the old behaviour where a
+        1s read timeout permanently killed the stream.
+        """
+        attempt = 0
+        backoff = 0.5
+        while not self._stop_event.is_set():
+            # --- open the stream -------------------------------------------------
+            try:
+                source = self._open_source()
+            except BridgeAPIError as exc:
+                # Auth/upstream errors on open are fatal — do not reconnect-loop.
+                if not self._stop_event.is_set():
+                    self.error_occurred.emit(str(exc))
+                return
+            except (httpx.TransportError, httpx.HTTPError) as exc:
+                if self._stop_event.is_set():
+                    return
+                attempt += 1
+                self.reconnecting.emit(attempt)
+                if self._stop_event.wait(backoff):
+                    return
+                backoff = min(backoff * 2.0, 5.0)
+                continue
+            except Exception as exc:
+                if not self._stop_event.is_set():
+                    self.error_occurred.emit(str(exc))
+                return
 
-                    if self._stop_event.is_set():
-                        break
+            # --- consume the stream ---------------------------------------------
+            self._source = source
+            try:
+                with source:
+                    for msg in source:
+                        if self._stop_event.is_set():
+                            break
+                        self._handle_message(msg)
+            except BridgeAPIError as exc:
+                if not self._stop_event.is_set():
+                    self.error_occurred.emit(str(exc))
+                return
+            except (httpx.TransportError, httpx.HTTPError):
+                # Idle read timeout / mid-stream drop → reconnect.
+                pass
+            except Exception as exc:
+                if not self._stop_event.is_set():
+                    self.error_occurred.emit(str(exc))
+                return
+            finally:
+                self._source = None
 
-                    if isinstance(data, list):
-                        for item in data:
-                            if self._stop_event.is_set():
-                                break
-                            if isinstance(item, dict):
-                                self.event_received.emit(item)
-                    elif isinstance(data, dict):
-                        self.event_received.emit(data)
+            if self._stop_event.is_set():
+                return
 
-        except Exception as exc:
-            if not self._stop_event.is_set():
-                self.error_occurred.emit(str(exc))
-        finally:
-            self._source = None
+            # Clean end or transient drop: back off, then reconnect. Keeps the
+            # worker alive across quiet periods and bridge restarts.
+            attempt += 1
+            self.reconnecting.emit(attempt)
+            if self._stop_event.wait(backoff):
+                return
+            backoff = min(backoff * 2.0, 5.0)
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -138,6 +198,14 @@ class ControllerStatus:
 
 
 class BridgeTracerController(QObject):
+    # Emitted whenever the recorded event set changes (live SSE ingest or
+    # fallback poll). The window connects this to a debounced timeline refresh
+    # so the UI updates without relying on the poll timer as a refresh clock.
+    events_changed = Signal()
+    # Emitted with a short stream-state string: "connected" | "reconnecting" |
+    # "error". Drives the live/reconnect affordance in the toolbar.
+    stream_state_changed = Signal(str)
+
     def __init__(self, *, client_factory: Callable[..., BridgeClient] = BridgeClient) -> None:
         super().__init__()
         self._client_factory = client_factory
@@ -149,6 +217,8 @@ class BridgeTracerController(QObject):
         self._worker: SSEStreamWorker | None = None
         self._worker_http_client = None
         self._log_fallback = False
+        self._stream_state = "idle"
+        self._last_stream_error = ""
 
     @property
     def events(self) -> list[EventModel]:
@@ -176,7 +246,7 @@ class BridgeTracerController(QObject):
             safe = safe.replace(at, "[REDACTED]")
 
         trace_ok = self.trace_available()
-        label = "connection: valid - ws connected" if trace_ok else "connection: valid - connected"
+        label = "token/auth: valid - ws connected" if trace_ok else "token/auth: valid - connected"
         self.status = ControllerStatus(
             connected=True,
             label=label,
@@ -208,28 +278,64 @@ class BridgeTracerController(QObject):
     def is_streaming(self) -> bool:
         return self._worker is not None and self._worker.isRunning()
 
+    @property
+    def stream_state(self) -> str:
+        return self._stream_state
+
+    @property
+    def last_stream_error(self) -> str:
+        return self._last_stream_error
+
     def _on_stream_event(self, raw_evt: dict) -> None:
         if self._recorder.state != RecordingState.RECORDING:
             return
+        # Any successful event means we have a live connection again.
+        if self._stream_state != "connected":
+            self._set_stream_state("connected")
         event_id = self._raw_event_id(raw_evt)
         if event_id and event_id in self._seen_ids:
             return
         event = self._recorder.feed(raw_evt)
         if event is not None:
             self._seen_ids.add(event.id)
+            # Event-driven UI refresh: the window listens to this instead of
+            # polling. Debounced downstream, so per-event emits are cheap.
+            self.events_changed.emit()
+
+    def _set_stream_state(self, state: str) -> None:
+        if state == self._stream_state:
+            return
+        self._stream_state = state
+        self.stream_state_changed.emit(state)
+
+    def _on_stream_reconnecting(self, _attempt: int) -> None:
+        if self._recorder.state == RecordingState.RECORDING:
+            self._set_stream_state("reconnecting")
+
+    def _on_stream_error(self, message: str) -> None:
+        self._last_stream_error = message
+        self._set_stream_state("error")
 
     def _stop_stream_worker(self) -> None:
         worker = self._worker
         self._worker = None
         if worker is not None:
+            for signal_name, slot in (
+                ("event_received", self._on_stream_event),
+                ("error_occurred", self._on_stream_error),
+                ("reconnecting", self._on_stream_reconnecting),
+            ):
+                signal = getattr(worker, signal_name, None)
+                if signal is not None:
+                    try:
+                        signal.disconnect(slot)
+                    except Exception:
+                        pass
             try:
-                try:
-                    worker.event_received.disconnect(self._on_stream_event)
-                except Exception:
-                    pass
                 worker.stop()
             except Exception:
                 pass
+        self._set_stream_state("idle")
 
     def _raw_event_id(self, raw: Any) -> str | None:
         if isinstance(raw, EventModel):
@@ -266,6 +372,17 @@ class BridgeTracerController(QObject):
                 http_client=self._worker_http_client
             )
             self._worker.event_received.connect(self._on_stream_event, Qt.QueuedConnection)
+            for signal_name, slot in (
+                ("error_occurred", self._on_stream_error),
+                ("reconnecting", self._on_stream_reconnecting),
+            ):
+                signal = getattr(self._worker, signal_name, None)
+                if signal is not None:
+                    try:
+                        signal.connect(slot, Qt.QueuedConnection)
+                    except Exception:
+                        signal.connect(slot)
+            self._set_stream_state("connecting")
             self._worker.start()
         elif _log_fallback_enabled():
             self._log_fallback = True
@@ -296,6 +413,8 @@ class BridgeTracerController(QObject):
             if self._recorder.feed(event) is not None:
                 self._seen_ids.add(event.id)
                 new_count += 1
+        if new_count > 0:
+            self.events_changed.emit()
         return new_count
 
     def stop_recording(self) -> RecordingMetadata:

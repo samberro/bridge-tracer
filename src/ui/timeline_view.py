@@ -275,11 +275,15 @@ class TimelineView(QGraphicsView):
         super().mouseReleaseEvent(event)
         self.setCursor(QCursor(Qt.OpenHandCursor))
 
-    def set_selected_event(self, event_id: str | None) -> None:
+    def set_selected_event(self, event_id: str | None, *, reveal: bool = False) -> None:
+        """Mark an event selected. Only scrolls the viewport when ``reveal`` is
+        explicitly requested (an explicit user navigation), never as a side
+        effect of a rebuild/append — background refreshes must not move the view.
+        """
         self.selected_event_id = event_id
         for eid, item in self.items_map.items():
             item.set_selected(eid == event_id)
-        if event_id and event_id in self.items_map:
+        if reveal and event_id and event_id in self.items_map:
             self.ensureVisible(self.items_map[event_id], 80, 80)
 
     def populate_events(self, events: list[EventModel], visual_state: str = "main_desktop_timeline") -> None:

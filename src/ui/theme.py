@@ -22,7 +22,9 @@ CATEGORY_COLORS: dict[EventCategory, str] = {
     EventCategory.TOOL: "#fb923c",
     EventCategory.MCP: "#f472b6",
     EventCategory.FILE: "#34d399",
-    EventCategory.PARSER: "#a78bfa",
+    # PARSER was identical to AUTH (#a78bfa), which broke "colour == category"
+    # scanning; nudged to a lighter magenta-violet so the two read distinctly.
+    EventCategory.PARSER: "#c084fc",
     EventCategory.ERROR: "#ff7070",
     EventCategory.PERFORMANCE: "#facc15",
 }

@@ -32,7 +32,8 @@ def test_fetch_logs_unwraps_events_envelope():
     assert [e["id"] for e in out] == ["log_1", "log_2"]
 
 
-def test_pull_logs_records_only_while_recording():
+def test_pull_logs_records_only_while_recording(monkeypatch):
+    monkeypatch.setenv("AI_BRIDGE_RECORDING_FALLBACK", "logs")
     box = [_log(1)]
     ctrl = BridgeTracerController(client_factory=lambda *a, **k: _client(box))
     ctrl.connect("http://bridge.test", "t")
@@ -44,7 +45,8 @@ def test_pull_logs_records_only_while_recording():
     assert ctrl.events[0].type == "llm.response"
 
 
-def test_pull_logs_dedupes_repeated_polls():
+def test_pull_logs_dedupes_repeated_polls(monkeypatch):
+    monkeypatch.setenv("AI_BRIDGE_RECORDING_FALLBACK", "logs")
     box = [_log(1), _log(2)]
     ctrl = BridgeTracerController(client_factory=lambda *a, **k: _client(box))
     ctrl.connect("http://bridge.test", "t")
@@ -58,7 +60,8 @@ def test_pull_logs_dedupes_repeated_polls():
     assert len(ctrl.events) == 3
 
 
-def test_pull_logs_resets_dedup_on_new_recording():
+def test_pull_logs_resets_dedup_on_new_recording(monkeypatch):
+    monkeypatch.setenv("AI_BRIDGE_RECORDING_FALLBACK", "logs")
     box = [_log(1)]
     ctrl = BridgeTracerController(client_factory=lambda *a, **k: _client(box))
     ctrl.connect("http://bridge.test", "t")

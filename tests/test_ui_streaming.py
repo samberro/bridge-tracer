@@ -69,15 +69,19 @@ def test_sse_stream_worker_handles_errors(qapp) -> None:
     worker.error_occurred.connect(errors.append)
 
     worker.start()
-    
+
+    # Wait while the worker is alive; a fatal 5xx makes it emit one error and
+    # exit (no reconnect loop), so isRunning() drops to False.
     start = time.time()
-    while not worker.isFinished() and time.time() - start < 2.0:
+    while worker.isRunning() and time.time() - start < 2.0:
         QCoreApplication.processEvents(QEventLoop.AllEvents, 10)
         time.sleep(0.01)
 
     for _ in range(5):
         QCoreApplication.processEvents(QEventLoop.AllEvents, 10)
         time.sleep(0.01)
+
+    worker.stop()
 
     assert len(errors) == 1
     assert "upstream error" in errors[0].lower() or "500" in errors[0]
