@@ -100,19 +100,21 @@ QFrame#logs_frame {{
     border-radius: 12px;
 }}
 
-QSplitter::handle {
-#     background: #1b2940;
-}
-QSplitter::handle:hover {
-#     background: #2f5f9b;
-}
-QFrame#inspector_section {
-#     background: #0b1526;
+QSplitter::handle {{
+    background: #1b2940;
+}}
+QSplitter::handle:hover {{
+    background: #2f5f9b;
+}}
+QSplitter::handle:horizontal {{ width: 6px; }}
+QSplitter::handle:vertical {{ height: 6px; }}
+QFrame#inspector_section {{
+    background: #0b1526;
     border: 1px solid #1f2a3d;
     border-radius: 10px;
-}
+}}
 QFrame#trigger_card {{
-#     background: #0b1526;
+    background: #0b1526;
     border: 1px solid {BORDER};
     border-radius: 14px;
 }}
@@ -148,11 +150,23 @@ QTabBar::tab {{
     border-top-right-radius: 8px;
 }}
 QTabBar::tab:selected {{
-#     background: #16233b;
+    background: #16233b;
     color: {TEXT};
     font-weight: bold;
 }}
 """
+
+# The block above is a str.format template (literal CSS braces are doubled).
+# Resolve the theme tokens once so both setStyleSheet(_STYLE) call sites get
+# valid QSS instead of the raw, unparseable template.
+_STYLE = _STYLE.format(
+    BACKGROUND=BACKGROUND,
+    SURFACE=SURFACE,
+    SURFACE_DARK=SURFACE_DARK,
+    BORDER=BORDER,
+    TEXT=TEXT,
+    TEXT_MUTED=TEXT_MUTED,
+)
 
 
 class RenderSettingsDialog(QDialog):
