@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtWidgets import QApplication
 
 from scripts.capture_bridge_tracer import capture_config_screenshots
+from scripts.capture_ui_screenshots import capture_ui_screenshots
 
 
 def _app() -> QApplication:
@@ -46,4 +47,18 @@ def test_capture_script_writes_every_configured_visual_state(tmp_path: Path) -> 
     written = capture_config_screenshots(config_path=config_path, project_root=Path.cwd())
 
     assert {path.name for path in written} == {"main.png", "detail.png"}
+    assert all(path.exists() and path.stat().st_size > 0 for path in written)
+
+
+def test_mandated_capture_script_writes_exact_current_screenshot_names(tmp_path: Path) -> None:
+    _app()
+
+    written = capture_ui_screenshots(output_dir=tmp_path)
+
+    assert {path.name for path in written} == {
+        "implemented_main_desktop_timeline.png",
+        "implemented_timeline_filmstrip.png",
+        "implemented_event_detail_inspector.png",
+        "implemented_filter_recording_sidebar.png",
+    }
     assert all(path.exists() and path.stat().st_size > 0 for path in written)

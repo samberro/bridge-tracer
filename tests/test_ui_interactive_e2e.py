@@ -9,12 +9,15 @@ from __future__ import annotations
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import time
+
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QCoreApplication, QEventLoop, Qt
 from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
 
 from src.core.schemas import RecordingState
+from src.ui.controller import BridgeTracerController
 from src.ui.interactive_window import InteractiveTracerWindow
 from src.ui.sample_data import build_sample_events
 
@@ -28,8 +31,37 @@ def _click(widget):
     QTest.mouseClick(widget, Qt.LeftButton)
 
 
+class FakeBridgeClient:
+    def __init__(self, base_url: str, token: str | None = None) -> None:
+        self.base_url = base_url
+        self.token = token
+
+    def trace_available(self) -> bool:
+        return False
+
+    def fetch_logs(self, limit=500):
+        return []
+
+    def list_events(self, *, since=None):
+        return []
+
+    def safe_describe(self) -> str:
+        return f"base_url={self.base_url}; has_at={'yes' if self.token else 'no'}"
+
+    def close(self) -> None:
+        pass
+
+
+def _pump_until(predicate, *, timeout_s: float = 1.5) -> None:
+    deadline = time.perf_counter() + timeout_s
+    while time.perf_counter() < deadline and not predicate():
+        QCoreApplication.processEvents(QEventLoop.AllEvents, 20)
+        time.sleep(0.01)
+
+
 def test_full_flow_with_real_mouse_clicks(qapp, tmp_path):
-    w = InteractiveTracerWindow(events=build_sample_events())
+    ctrl = BridgeTracerController(client_factory=FakeBridgeClient)
+    w = InteractiveTracerWindow(events=build_sample_events(), controller=ctrl)
     w.resize(1440, 900)
     w.show()
 
@@ -38,6 +70,7 @@ def test_full_flow_with_real_mouse_clicks(qapp, tmp_path):
     QTest.keyClicks(w.url_edit, "http://127.0.0.1:8080")
     QTest.keyClicks(w.token_edit, "e2e-secret")
     _click(w.connect_btn)
+    _pump_until(lambda: w.controller.status.connected and not w._connect_in_flight)
     assert w.controller.status.connected is True
     assert "e2e-secret" not in w.status_label.text()
 
@@ -69,6 +102,7 @@ def test_save_and_load_roundtrip_with_real_clicks(qapp, tmp_path):
     saver = InteractiveTracerWindow(events=build_sample_events())
     saver.save_path_provider = lambda: path
     _click(saver.save_btn)
+    _pump_until(lambda: path.exists() and not saver._save_in_flight)
     assert path.exists()
     saver.close()
     saver.deleteLater()
@@ -77,6 +111,7 @@ def test_save_and_load_roundtrip_with_real_clicks(qapp, tmp_path):
     assert loader.event_count() == 0
     loader.open_path_provider = lambda: path
     _click(loader.load_btn)
+    _pump_until(lambda: loader.event_count() == len(build_sample_events()) and not loader._load_in_flight)
     assert loader.event_count() == len(build_sample_events())
     assert loader.inspector_text().strip() != ""
     loader.close()

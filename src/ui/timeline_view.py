@@ -17,7 +17,10 @@ from PySide6.QtWidgets import (
 )
 
 from src.core.schemas import EventCategory, EventLevel, EventModel
-from src.ui.theme import BACKGROUND, BORDER, CATEGORY_COLORS, SURFACE, TEXT, TEXT_DIM, TEXT_MUTED
+from src.ui.theme import (
+    BACKGROUND, BORDER, BORDER_SOFT, CARD_BG, CARD_BG_HOVER, CATEGORY_COLORS,
+    ELEV_SEL_RING, STATE_ERROR, STATE_WARN, SURFACE, SURFACE_ALT, TEXT, TEXT_DIM, TEXT_MUTED,
+)
 from src.ui.render_rules import preview_for_event, title_for_event
 
 
@@ -46,6 +49,7 @@ class EventCardItem(QGraphicsObject):
         self.width = width
         self.height = height
         self._selected = False
+        self._hover = False
         self.setAcceptHoverEvents(True)
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         # Compute display text ONCE. title_for_event / preview_for_event run the
@@ -53,7 +57,18 @@ class EventCardItem(QGraphicsObject):
         # inside paint() (called many times per card on scroll/zoom).
         self._title_text = title_for_event(event_model)
         self._subtitle_text = self._compute_subtitle()
+        self._meta_text = f"{event_model.duration_ms:.0f}ms" if event_model.duration_ms is not None else ""
         self.setToolTip(self._compute_tooltip())
+
+    def hoverEnterEvent(self, evt) -> None:
+        self._hover = True
+        self.update()
+        super().hoverEnterEvent(evt)
+
+    def hoverLeaveEvent(self, evt) -> None:
+        self._hover = False
+        self.update()
+        super().hoverLeaveEvent(evt)
 
     def set_selected(self, selected: bool) -> None:
         if self._selected != selected:
@@ -78,14 +93,29 @@ class EventCardItem(QGraphicsObject):
         rect = QRectF(0, 0, self.width, self.height)
         painter.setRenderHint(QPainter.Antialiasing, True)
 
+        # Solid selection ring (was a hard-to-find dashed outline).
         if self._selected:
-            painter.setPen(QPen(QColor("#d9e4ff"), 1.7, Qt.DashLine))
+            painter.setPen(QPen(QColor(ELEV_SEL_RING), 1.5))
             painter.setBrush(Qt.NoBrush)
-            painter.drawRoundedRect(QRectF(-7, -7, self.width + 14, self.height + 14), 13, 13)
+            painter.drawRoundedRect(QRectF(-6, -6, self.width + 12, self.height + 12), 13, 13)
 
-        painter.setPen(QPen(QColor("#ef4444") if is_error else color, 1.4))
-        painter.setBrush(QBrush(QColor("#0d1728")))
+        body = QColor(CARD_BG_HOVER) if (self._hover or self._selected) else QColor(CARD_BG)
+        edge = QColor(STATE_ERROR) if is_error else color
+        if self._hover and not is_error:
+            edge = QColor(color); edge.setAlphaF(0.85)
+        painter.setPen(QPen(edge, 1.4 if (is_error or self._selected) else 1.0))
+        painter.setBrush(QBrush(body))
         painter.drawRoundedRect(rect, 11, 11)
+
+        # Severity wash: a faint tint so errors/warnings read pre-attentively.
+        if is_error:
+            wash = QColor(STATE_ERROR); wash.setAlphaF(0.08)
+            painter.setPen(Qt.NoPen); painter.setBrush(QBrush(wash))
+            painter.drawRoundedRect(rect, 11, 11)
+        elif event.level == EventLevel.WARNING:
+            wash = QColor(STATE_WARN); wash.setAlphaF(0.06)
+            painter.setPen(Qt.NoPen); painter.setBrush(QBrush(wash))
+            painter.drawRoundedRect(rect, 11, 11)
 
         # Category stripe/dot.
         painter.setPen(Qt.NoPen)
@@ -102,11 +132,17 @@ class EventCardItem(QGraphicsObject):
         font_sub = QFont("Segoe UI", 8)
         painter.setFont(font_sub)
         painter.setPen(QColor(TEXT_MUTED))
-        painter.drawText(QRectF(30, 29, self.width - 40, 19), Qt.AlignLeft | Qt.AlignVCenter, self._elide(self._subtitle_text, 44))
+        painter.drawText(QRectF(30, 29, self.width - 100, 19), Qt.AlignLeft | Qt.AlignVCenter, self._elide(self._subtitle_text, 36))
+
+        # Mono duration meta, bottom-right (tabular, so it doesn't jitter live).
+        if self._meta_text:
+            painter.setFont(QFont("Consolas", 8))
+            painter.setPen(QColor(TEXT_DIM))
+            painter.drawText(QRectF(self.width - 66, 29, 58, 19), Qt.AlignRight | Qt.AlignVCenter, self._meta_text)
 
         if is_error:
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(QColor("#ef4444")))
+            painter.setBrush(QBrush(QColor(STATE_ERROR)))
             painter.drawEllipse(QRectF(self.width - 22, 9, 14, 14))
             painter.setPen(QColor("#ffffff"))
             painter.drawText(QRectF(self.width - 22, 8, 14, 14), Qt.AlignCenter, "!")
@@ -313,33 +349,45 @@ class TimelineScene(QGraphicsScene):
     def drawBackground(self, painter: QPainter, rect: QRectF) -> None:
         super().drawBackground(painter, rect)
         painter.setRenderHint(QPainter.Antialiasing, True)
+        width = self.sceneRect().width()
 
-        # Subtle vertical time grid.
-        grid_pen = QPen(QColor("#172033"), 1, Qt.DotLine)
-        painter.setPen(grid_pen)
+        # Faint vertical time grid (quiet — gaps read as 'quiet time', not breakage).
+        painter.setPen(QPen(QColor("#101a2b"), 1, Qt.DotLine))
         left = max(140, int(rect.left()) - (int(rect.left()) % 160))
         right = int(rect.right()) + 160
         for x in range(left, right, 160):
             painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
 
-        font = QFont("Segoe UI", 9)
-        font.setBold(True)
-        painter.setFont(font)
-
+        # Quiet alternating lane bands + a 1px boundary hairline (no colored
+        # centerline through the lane — that competed with the cards).
         for index, (category, y) in enumerate(self._lane_y.items()):
-            band = QRectF(0, y - self._lane_height / 2, self.sceneRect().width(), self._lane_height)
+            band = QRectF(0, y - self._lane_height / 2, width, self._lane_height)
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(QColor("#0d1424" if index % 2 == 0 else "#0a1020")))
+            painter.setBrush(QBrush(QColor("#0b1322" if index % 2 == 0 else "#0a101e")))
             painter.drawRect(band)
+            painter.setPen(QPen(QColor(BORDER_SOFT), 1))
+            painter.drawLine(QPointF(120, y + self._lane_height / 2), QPointF(width, y + self._lane_height / 2))
 
+        # Left rail: surface strip + dot + UPPERCASE label + count chip per lane.
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(SURFACE)))
+        painter.drawRect(QRectF(0, rect.top(), 120, rect.height()))
+        painter.setPen(QPen(QColor(BORDER_SOFT), 1))
+        painter.drawLine(QPointF(120, rect.top()), QPointF(120, rect.bottom()))
+
+        painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
+        for category, y in self._lane_y.items():
             color = QColor(CATEGORY_COLORS.get(category, "#9aa4b2"))
-            painter.setPen(QPen(color, 1, Qt.DashLine))
-            painter.drawLine(QPointF(128, y), QPointF(self.sceneRect().width() - 24, y))
-
-            painter.setPen(color)
-            painter.drawText(QRectF(14, y - 17, 92, 20), Qt.AlignLeft | Qt.AlignVCenter, category.value.upper())
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(QRectF(12, y - 4, 8, 8))
+            painter.setPen(QColor(TEXT_DIM))
+            painter.drawText(QRectF(26, y - 9, 58, 18), Qt.AlignLeft | Qt.AlignVCenter, category.value.upper())
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor(SURFACE_ALT)))
+            painter.drawRoundedRect(QRectF(86, y - 8, 28, 16), 8, 8)
             painter.setPen(QColor(TEXT_MUTED))
-            painter.drawText(QRectF(92, y - 17, 28, 20), Qt.AlignRight | Qt.AlignVCenter, str(self._lane_counts.get(category, 0)))
+            painter.drawText(QRectF(86, y - 8, 28, 16), Qt.AlignCenter, str(self._lane_counts.get(category, 0)))
 
 
 class TimelineView(QGraphicsView):

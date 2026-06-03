@@ -6,8 +6,10 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
+from src.core.schemas import EventCategory
 from src.ui.interactive_window import InteractiveTracerWindow
 from src.ui.sample_data import build_sample_events
 
@@ -46,3 +48,47 @@ def test_selection_sync_is_constant_time(qapp):
     assert current.data(0, _ID_ROLE) == target
     w.close()
     w.deleteLater()
+
+
+def test_filter_presets_persist_apply_and_delete(qapp, tmp_path):
+    ini = str(tmp_path / "filter-presets.ini")
+    w1 = InteractiveTracerWindow(events=build_sample_events())
+    w1._settings = QSettings(ini, QSettings.IniFormat)
+
+    w1.post_search_edit.setText("llm")
+    w1.post_errors_only_chk.setChecked(True)
+    for category, chk in w1.post_category_checks.items():
+        chk.setChecked(category in {EventCategory.LLM, EventCategory.ERROR})
+    idx = w1.run_selector.findData("run_8f31b2")
+    assert idx >= 0
+    w1.run_selector.setCurrentIndex(idx)
+    w1.preset_name_edit.setText("LLM errors")
+
+    w1._save_filter_preset()
+    assert "LLM errors" in w1._filter_preset_names()
+    w1.close()
+    w1.deleteLater()
+
+    w2 = InteractiveTracerWindow(events=build_sample_events())
+    w2._settings = QSettings(ini, QSettings.IniFormat)
+    w2._refresh_filter_presets()
+
+    assert "LLM errors" in w2._filter_preset_names()
+
+    w2._clear_post_filters()
+    assert w2.post_search_edit.text() == ""
+    assert w2._post_filter_run is None
+
+    w2.preset_selector.setCurrentIndex(w2.preset_selector.findText("LLM errors"))
+    w2._apply_filter_preset()
+
+    assert w2.post_search_edit.text() == "llm"
+    assert w2.post_errors_only_chk.isChecked()
+    assert w2._post_filter_run == "run_8f31b2"
+    selected = {category for category, chk in w2.post_category_checks.items() if chk.isChecked()}
+    assert selected == {EventCategory.LLM, EventCategory.ERROR}
+
+    w2._delete_filter_preset()
+    assert "LLM errors" not in w2._filter_preset_names()
+    w2.close()
+    w2.deleteLater()

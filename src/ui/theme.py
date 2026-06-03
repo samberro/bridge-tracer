@@ -8,9 +8,23 @@ SURFACE = "#0e1728"
 SURFACE_DARK = "#071020"
 SURFACE_ALT = "#101b2d"
 BORDER = "#22324c"
+BORDER_SOFT = "#1a2740"   # quiet dividers / lane edges
 TEXT = "#e6e9f0"
 TEXT_MUTED = "#b9c1d1"
 TEXT_DIM = "#8390a5"
+TEXT_FAINT = "#5c6678"    # disabled / placeholder
+
+# Event-card surfaces (were hard-coded in painters).
+CARD_BG = "#0d1728"
+CARD_BG_HOVER = "#122036"
+ELEV_SEL_RING = "#d9e4ff"  # selection ring
+
+# Semantic state colours (not category): live/recording, reconnecting, error.
+STATE_LIVE = "#22c55e"
+STATE_WARN = "#facc15"
+STATE_ERROR = "#ff5d5d"
+STATE_IDLE = "#64748b"
+ACCENT = "#5b8def"        # primary action / focus / splitter grip
 
 CATEGORY_COLORS: dict[EventCategory, str] = {
     EventCategory.SYSTEM: "#9aa4b2",

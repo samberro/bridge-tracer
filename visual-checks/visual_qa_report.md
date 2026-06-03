@@ -13,7 +13,7 @@ visual-checks/current/implemented_main_desktop_timeline.png
 Diff:
 visual-checks/diffs/implemented_main_desktop_timeline.diff.png
 
-Status: PASS (Diff score: 16.76)
+Status: PASS (Diff score: 15.69)
 
 Differences found:
 - [ ] layout
@@ -43,7 +43,7 @@ visual-checks/current/implemented_timeline_filmstrip.png
 Diff:
 visual-checks/diffs/implemented_timeline_filmstrip.diff.png
 
-Status: PASS (Diff score: 12.70)
+Status: PASS (Diff score: 12.55)
 
 Differences found:
 - [ ] layout
@@ -73,7 +73,7 @@ visual-checks/current/implemented_event_detail_inspector.png
 Diff:
 visual-checks/diffs/implemented_event_detail_inspector.diff.png
 
-Status: PASS (Diff score: 14.99)
+Status: PASS (Diff score: 13.77)
 
 Differences found:
 - [ ] layout
@@ -103,7 +103,7 @@ visual-checks/current/implemented_filter_recording_sidebar.png
 Diff:
 visual-checks/diffs/implemented_filter_recording_sidebar.diff.png
 
-Status: PASS (Diff score: 11.86)
+Status: PASS (Diff score: 11.38)
 
 Differences found:
 - [ ] layout

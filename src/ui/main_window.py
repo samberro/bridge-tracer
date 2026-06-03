@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import difflib
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, QSettings, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSplitter,
+    QSplitterHandle,
     QTabWidget,
     QTextEdit,
     QGraphicsOpacityEffect,
@@ -35,10 +37,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.core.schemas import EventCategory, EventModel, RecordingState
+from src.core.schemas import EventCategory, EventModel, RecordingMetadata, RecordingState
+from src.core.storage import RecordingStorage
 from src.ui.controller import BridgeTracerController
+from src.ui.async_runner import AsyncRunner
 from src.ui.sample_data import build_sample_events
-from src.ui.theme import BACKGROUND, BORDER, CATEGORY_COLORS, SURFACE, SURFACE_DARK, SURFACE_ALT, TEXT, TEXT_DIM, TEXT_MUTED
+from src.ui.theme import ACCENT, BACKGROUND, BORDER, BORDER_SOFT, CATEGORY_COLORS, SURFACE, SURFACE_DARK, SURFACE_ALT, TEXT, TEXT_DIM, TEXT_MUTED
 from src.ui.timeline_view import TimelineView
 from src.ui.render_rules import (
     RenderRule,
@@ -48,7 +52,7 @@ from src.ui.render_rules import (
     pinned_values_for_event,
     reset_rules,
 )
-from src.ui.view_models import EventDetail, TimelineViewModel
+from src.ui.view_models import EventDetail, TimelineViewModel, compare_event_details
 
 
 def _env_auth_token() -> str:
@@ -107,8 +111,8 @@ QSplitter::handle {{
 QSplitter::handle:hover {{
     background: #2f5f9b;
 }}
-QSplitter::handle:horizontal {{ width: 6px; }}
-QSplitter::handle:vertical {{ height: 6px; }}
+QSplitter::handle:horizontal {{ width: 8px; }}
+QSplitter::handle:vertical {{ height: 8px; }}
 QFrame#inspector_section {{
     background: #0b1526;
     border: 1px solid #1f2a3d;
@@ -168,6 +172,48 @@ _STYLE = _STYLE.format(
     TEXT=TEXT,
     TEXT_MUTED=TEXT_MUTED,
 )
+
+
+class _GripHandle(QSplitterHandle):
+    """Splitter handle with a centred 3-dot grip so the resize affordance is
+    discoverable (the original handles were near-invisible seams)."""
+
+    def __init__(self, orientation, parent) -> None:
+        super().__init__(orientation, parent)
+        self._hover = False
+        self.setMouseTracking(True)
+
+    def enterEvent(self, e) -> None:
+        self._hover = True
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e) -> None:
+        self._hover = False
+        self.update()
+        super().leaveEvent(e)
+
+    def paintEvent(self, e) -> None:
+        super().paintEvent(e)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(ACCENT if self._hover else "#3a4a6a"))
+        r = self.rect()
+        cx, cy = r.center().x(), r.center().y()
+        if self.orientation() == Qt.Horizontal:
+            for dy in (-7, 0, 7):
+                p.drawEllipse(int(cx) - 1, int(cy) + dy - 1, 2, 2)
+        else:
+            for dx in (-7, 0, 7):
+                p.drawEllipse(int(cx) + dx - 1, int(cy) - 1, 2, 2)
+
+
+class GripSplitter(QSplitter):
+    """QSplitter that uses _GripHandle so handles are visible and grabbable."""
+
+    def createHandle(self) -> QSplitterHandle:
+        return _GripHandle(self.orientation(), self)
 
 
 class RenderSettingsDialog(QDialog):
@@ -284,6 +330,15 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(_STYLE)
 
         self.controller = controller or BridgeTracerController()
+        self._async_runner = AsyncRunner(parent=self)
+        self._async_runner.finished.connect(self._on_async_finished)
+        self._async_runner.failed.connect(self._on_async_failed)
+        self._connect_in_flight = False
+        self._connect_error = ""
+        self._poll_error = ""
+        self._save_in_flight = False
+        self._load_in_flight = False
+        self._file_error = ""
         if events is not None:
             initial_events = list(events)
         else:
@@ -293,6 +348,7 @@ class MainWindow(QMainWindow):
         self.controller.set_events(initial_events)
         self.model = TimelineViewModel(initial_events)
         self.visual_state = visual_state
+        self._compare_base_event_id: str | None = None
 
         # Injectable path providers (for tests)
         self.save_path_provider: Callable[[], Optional[Path]] = self._ask_save_path
@@ -302,7 +358,7 @@ class MainWindow(QMainWindow):
         self.poll_interval_ms = 1000
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(self.poll_interval_ms)
-        self._poll_timer.timeout.connect(self._poll_once)
+        self._poll_timer.timeout.connect(self._poll_once_async)
 
         # Debounce expensive full timeline rebuilds during live streaming.
         self._timeline_rebuild_pending = False
@@ -341,6 +397,8 @@ class MainWindow(QMainWindow):
 
         self._settings = QSettings("BridgeTracer", "BridgeTracer")
         self._build_ui()
+        self._build_shortcuts()
+        self._refresh_filter_presets()
         self.set_visual_state(visual_state)
         self._refresh_controls()
         self._restore_layout()
@@ -361,7 +419,7 @@ class MainWindow(QMainWindow):
         # Root workspace is the only horizontal splitter directly under the
         # toolbar. The inspector is a sibling of the whole left work surface,
         # so the filter panel never pushes the right inspector down.
-        self.workspace_splitter = QSplitter(Qt.Horizontal)
+        self.workspace_splitter = GripSplitter(Qt.Horizontal)
         self.workspace_splitter.setObjectName("workspace_splitter")
         self.workspace_splitter.setChildrenCollapsible(False)
         self.root_layout.addWidget(self.workspace_splitter, 1)
@@ -388,7 +446,7 @@ class MainWindow(QMainWindow):
 
         # The main surface is horizontally resizable within the left work area.
         # It owns the optional sidebar plus the center timeline/list area.
-        self.surface_splitter = QSplitter(Qt.Horizontal)
+        self.surface_splitter = GripSplitter(Qt.Horizontal)
         self.surface_splitter.setObjectName("surface_splitter")
         self.surface_splitter.setChildrenCollapsible(False)
         self.left_work_layout.addWidget(self.surface_splitter, 1)
@@ -487,7 +545,7 @@ class MainWindow(QMainWindow):
 
         self.connect_btn = QPushButton("Connect")
         self.connect_btn.setObjectName("connect_btn")
-        self.connect_btn.clicked.connect(self._on_connect)
+        self.connect_btn.clicked.connect(self._on_connect_async)
         self.toolbar_layout.addWidget(self.connect_btn)
 
         self.start_btn = QPushButton("Start Recording")
@@ -503,12 +561,12 @@ class MainWindow(QMainWindow):
 
         self.save_btn = QPushButton("Save")
         self.save_btn.setObjectName("save_btn")
-        self.save_btn.clicked.connect(self._on_save)
+        self.save_btn.clicked.connect(self._on_save_async)
         self.toolbar_layout.addWidget(self.save_btn)
 
         self.load_btn = QPushButton("Load")
         self.load_btn.setObjectName("load_btn")
-        self.load_btn.clicked.connect(self._on_load)
+        self.load_btn.clicked.connect(self._on_load_async)
         self.toolbar_layout.addWidget(self.load_btn)
 
         self.filter_btn = QPushButton("Filters")
@@ -559,6 +617,23 @@ class MainWindow(QMainWindow):
 
         self.root_layout.addLayout(self.toolbar_layout)
 
+    def _build_shortcuts(self) -> None:
+        self._shortcuts: list[QShortcut] = []
+
+        def bind(sequence: str | QKeySequence.StandardKey, slot: Callable[[], None]) -> None:
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.WindowShortcut)
+            shortcut.activated.connect(slot)
+            self._shortcuts.append(shortcut)
+
+        bind("/", self._focus_search)
+        bind("F", self._fit_timeline)
+        bind("L", self._jump_to_live)
+        bind("Esc", self._clear_selection)
+        bind("Up", lambda: self._select_relative_event(-1))
+        bind("Down", lambda: self._select_relative_event(1))
+        bind("Space", self._toggle_recording)
+
     def _build_filter_panel(self) -> None:
         layout = QVBoxLayout(self.filter_panel)
         layout.setContentsMargins(14, 12, 14, 12)
@@ -594,6 +669,28 @@ class MainWindow(QMainWindow):
         self.post_errors_only_chk.stateChanged.connect(self._on_post_filter_changed)
         row.addWidget(self.post_errors_only_chk)
         layout.addLayout(row)
+
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(8)
+        preset_row.addWidget(QLabel("Preset"))
+        self.preset_selector = QComboBox()
+        self.preset_selector.setMinimumWidth(150)
+        preset_row.addWidget(self.preset_selector)
+        self.preset_name_edit = QLineEdit()
+        self.preset_name_edit.setPlaceholderText("preset name")
+        self.preset_name_edit.setFixedWidth(140)
+        preset_row.addWidget(self.preset_name_edit)
+        self.save_preset_btn = QPushButton("Save")
+        self.save_preset_btn.clicked.connect(self._save_filter_preset)
+        preset_row.addWidget(self.save_preset_btn)
+        self.apply_preset_btn = QPushButton("Apply")
+        self.apply_preset_btn.clicked.connect(self._apply_filter_preset)
+        preset_row.addWidget(self.apply_preset_btn)
+        self.delete_preset_btn = QPushButton("Delete")
+        self.delete_preset_btn.clicked.connect(self._delete_filter_preset)
+        preset_row.addWidget(self.delete_preset_btn)
+        preset_row.addStretch(1)
+        layout.addLayout(preset_row)
 
         cat_row = QHBoxLayout()
         cat_row.setSpacing(8)
@@ -735,7 +832,13 @@ class MainWindow(QMainWindow):
         self.conn_url_lbl.setText(url or "—")
         has_token = bool(self.token_edit.text().strip()) if hasattr(self, "token_edit") else False
         self.conn_token_lbl.setText("present" if has_token else "none")  # never the token itself
-        self.conn_auth_lbl.setText("valid" if self.controller.status.connected else "disconnected")
+        if self._connect_in_flight:
+            auth = "connecting"
+        elif self._connect_error:
+            auth = "error"
+        else:
+            auth = "valid" if self.controller.status.connected else "disconnected"
+        self.conn_auth_lbl.setText(auth)
 
     def _build_trigger_matrix(self) -> None:
         matrix_content = QWidget()
@@ -827,7 +930,7 @@ class MainWindow(QMainWindow):
 
         # All main inspector sections are vertically resizable. This prevents
         # the object browser/raw JSON/evaluate areas from collapsing each other.
-        self.inspector_splitter = QSplitter(Qt.Vertical)
+        self.inspector_splitter = GripSplitter(Qt.Vertical)
         self.inspector_splitter.setObjectName("inspector_splitter")
         self.inspector_splitter.setChildrenCollapsible(False)
         layout.addWidget(self.inspector_splitter, 1)
@@ -907,9 +1010,12 @@ class MainWindow(QMainWindow):
         self.action_layout.setSpacing(6)
         self.copy_btn = QPushButton("Copy JSON")
         self.file_ref_btn = QPushButton("Open File Ref")
+        self.compare_btn = QPushButton("Compare")
         self.copy_btn.clicked.connect(self._copy_selected_json)
+        self.compare_btn.clicked.connect(self._compare_selected_event)
         self.action_layout.addWidget(self.copy_btn)
         self.action_layout.addWidget(self.file_ref_btn)
+        self.action_layout.addWidget(self.compare_btn)
         layout.addLayout(self.action_layout)
 
     def _build_logs_panel(self) -> None:
@@ -1071,6 +1177,119 @@ class MainWindow(QMainWindow):
         self._rebuild_timeline()
         self._refresh_controls()
 
+    def _filter_preset_key(self, name: str) -> str:
+        return f"filter_presets/{name}"
+
+    def _filter_preset_names(self) -> list[str]:
+        settings = getattr(self, "_settings", None)
+        if settings is None:
+            return []
+        settings.beginGroup("filter_presets")
+        names = sorted(settings.childKeys(), key=str.casefold)
+        settings.endGroup()
+        return names
+
+    def _current_filter_preset_payload(self) -> dict[str, Any]:
+        return {
+            "search": self.post_search_edit.text(),
+            "errors_only": self.post_errors_only_chk.isChecked(),
+            "categories": [
+                category.value for category, chk in self.post_category_checks.items()
+                if chk.isChecked()
+            ],
+            "run": self.run_selector.currentData() if hasattr(self, "run_selector") else None,
+        }
+
+    def _refresh_filter_presets(self) -> None:
+        if not hasattr(self, "preset_selector"):
+            return
+        current = self.preset_selector.currentText()
+        self.preset_selector.blockSignals(True)
+        self.preset_selector.clear()
+        self.preset_selector.addItem("Select preset…")
+        for name in self._filter_preset_names():
+            self.preset_selector.addItem(name)
+        index = self.preset_selector.findText(current)
+        self.preset_selector.setCurrentIndex(index if index >= 0 else 0)
+        self.preset_selector.blockSignals(False)
+
+    def _save_filter_preset(self) -> None:
+        name = self.preset_name_edit.text().strip() if hasattr(self, "preset_name_edit") else ""
+        if not name:
+            name = self.preset_selector.currentText().strip() if hasattr(self, "preset_selector") else ""
+        if not name or name == "Select preset…":
+            return
+        settings = getattr(self, "_settings", None)
+        if settings is None:
+            return
+        settings.setValue(self._filter_preset_key(name), json.dumps(self._current_filter_preset_payload()))
+        settings.sync()
+        self._refresh_filter_presets()
+        index = self.preset_selector.findText(name)
+        if index >= 0:
+            self.preset_selector.setCurrentIndex(index)
+
+    def _apply_filter_preset(self) -> None:
+        name = self.preset_selector.currentText().strip() if hasattr(self, "preset_selector") else ""
+        if not name or name == "Select preset…":
+            return
+        raw = getattr(self, "_settings", None).value(self._filter_preset_key(name), "")
+        if not raw:
+            return
+        try:
+            payload = json.loads(str(raw))
+        except json.JSONDecodeError:
+            return
+
+        self.post_search_edit.blockSignals(True)
+        self.post_errors_only_chk.blockSignals(True)
+        for chk in self.post_category_checks.values():
+            chk.blockSignals(True)
+        if hasattr(self, "run_selector"):
+            self.run_selector.blockSignals(True)
+
+        self.post_search_edit.setText(str(payload.get("search") or ""))
+        self.post_errors_only_chk.setChecked(bool(payload.get("errors_only")))
+        allowed_category_values = {category.value for category in self.post_category_checks}
+        selected_categories: set[EventCategory] = set()
+        for value in payload.get("categories", []):
+            if value in allowed_category_values:
+                selected_categories.add(EventCategory(value))
+        for category, chk in self.post_category_checks.items():
+            chk.setChecked(category in selected_categories)
+        run_id = payload.get("run")
+        if hasattr(self, "run_selector"):
+            index = self.run_selector.findData(run_id)
+            self.run_selector.setCurrentIndex(index if index >= 0 else 0)
+
+        self.post_search_edit.blockSignals(False)
+        self.post_errors_only_chk.blockSignals(False)
+        for chk in self.post_category_checks.values():
+            chk.blockSignals(False)
+        if hasattr(self, "run_selector"):
+            self.run_selector.blockSignals(False)
+
+        self._post_filter_text = self.post_search_edit.text()
+        self._post_errors_only = self.post_errors_only_chk.isChecked()
+        self._post_filter_categories = {
+            category for category, chk in self.post_category_checks.items()
+            if chk.isChecked()
+        }
+        self._post_filter_run = self.run_selector.currentData() if hasattr(self, "run_selector") else None
+        self._rebuild_timeline()
+        self._refresh_controls()
+
+    def _delete_filter_preset(self) -> None:
+        name = self.preset_selector.currentText().strip() if hasattr(self, "preset_selector") else ""
+        if not name or name == "Select preset…":
+            return
+        settings = getattr(self, "_settings", None)
+        if settings is None:
+            return
+        settings.remove(self._filter_preset_key(name))
+        settings.sync()
+        self._refresh_filter_presets()
+
     def _clear_post_filters(self) -> None:
         self.post_search_edit.blockSignals(True)
         self.post_errors_only_chk.blockSignals(True)
@@ -1108,6 +1327,53 @@ class MainWindow(QMainWindow):
     def _fit_timeline(self) -> None:
         self.timeline_view.fit_to_events()
 
+    def _focus_search(self) -> None:
+        self._set_filter_panel_visible(True)
+        self.post_search_edit.setFocus(Qt.ShortcutFocusReason)
+        self.post_search_edit.selectAll()
+
+    def _jump_to_live(self) -> None:
+        events = self._filtered_events()
+        if events:
+            self.select_event(events[-1].id)
+            self.timeline_view.set_selected_event(events[-1].id, reveal=True)
+
+    def _toggle_recording(self) -> None:
+        if self.controller.status.recording_state == RecordingState.RECORDING:
+            self._on_stop()
+        elif self.start_btn.isEnabled():
+            self._on_start()
+
+    def _select_relative_event(self, offset: int) -> None:
+        events = self._filtered_events()
+        if not events:
+            return
+        ids = [event.id for event in events]
+        current = self.model.selected_event_id
+        if current in ids:
+            index = ids.index(current)
+            index = max(0, min(len(ids) - 1, index + offset))
+        else:
+            index = 0 if offset >= 0 else len(ids) - 1
+        self.select_event(ids[index])
+        self.timeline_view.set_selected_event(ids[index], reveal=True)
+
+    def _clear_selection(self) -> None:
+        self.model.selected_event_id = None
+        self.timeline_view.set_selected_event(None)
+        self.event_list.blockSignals(True)
+        self.event_list.clearSelection()
+        self.event_list.setCurrentItem(None)
+        self.event_list.blockSignals(False)
+        self.ins_title.setText("No event selected")
+        self.raw_json_box.clear()
+        self.eval_result_box.clear()
+        self._populate_object_tree(None)
+        for i in reversed(range(self.fields_layout.count())):
+            widget = self.fields_layout.itemAt(i).widget()
+            if widget is not None:
+                widget.setParent(None)
+
     def _collapse_timeline_groups(self) -> None:
         self.timeline_view.collapse_all_groups()
 
@@ -1126,6 +1392,9 @@ class MainWindow(QMainWindow):
         self._refresh_inspector()
 
     def select_event(self, event_id: str) -> None:
+        current = self.model.selected_event_id
+        if current and current != event_id:
+            self._compare_base_event_id = current
         self.model.select_event(event_id)
         self.timeline_view.set_selected_event(event_id)
         self._sync_event_list_selection(event_id)
@@ -1153,6 +1422,9 @@ class MainWindow(QMainWindow):
             return
         event_id = item.data(0, _ID_ROLE)
         if event_id:
+            current = self.model.selected_event_id
+            if current and current != event_id:
+                self._compare_base_event_id = current
             self.model.select_event(event_id)
             self.timeline_view.set_selected_event(event_id)
             self._refresh_inspector()
@@ -1235,10 +1507,80 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
+    def _connect_now(self, url: str, token: str | None):
+        self._connect_error = ""
+        return self.controller.connect(url, token)
+
     def _on_connect(self) -> None:
         token = self.token_edit.text().strip() or _env_auth_token() or None
-        self.controller.connect(self.url_edit.text().strip(), token)
+        self._connect_now(self.url_edit.text().strip(), token)
         self._refresh_controls()
+
+    def _on_connect_async(self) -> None:
+        if self._connect_in_flight:
+            return
+        token = self.token_edit.text().strip() or _env_auth_token() or None
+        url = self.url_edit.text().strip()
+        self._connect_in_flight = True
+        self._connect_error = ""
+        self._refresh_controls()
+        try:
+            self._async_runner.run(lambda: self._connect_now(url, token), key="connect")
+        except RuntimeError:
+            # Duplicate clicks can race the disabled state by a few event-loop
+            # ticks; keep the first in-flight operation and ignore the rest.
+            self._refresh_controls()
+
+    def _on_async_finished(self, call_id: str, _value: object) -> None:
+        if call_id == "connect":
+            self._connect_in_flight = False
+            self._connect_error = ""
+            self._refresh_controls()
+        elif call_id == "poll":
+            self._poll_error = ""
+            old_count, new_count = _value if isinstance(_value, tuple) else (len(self.model.events), 0)
+            current_count = len(self.controller.events)
+            added_via_stream = current_count - (old_count + new_count)
+            total_new = new_count + max(0, added_via_stream)
+            if total_new > 0:
+                self._schedule_rebuild_from_controller()
+            self._refresh_controls()
+        elif call_id == "save":
+            self._save_in_flight = False
+            self._file_error = ""
+            self._refresh_controls()
+        elif call_id == "load":
+            self._load_in_flight = False
+            self._file_error = ""
+            metadata, events, _errors = _value
+            self.controller.apply_loaded_recording(metadata, events)
+            self.model = TimelineViewModel(self.controller.events)
+            self._rebuild_timeline()
+            if self.model.selected_event is not None:
+                self.select_event(self.model.selected_event.id)
+            self._refresh_controls()
+
+    def _on_async_failed(self, call_id: str, exc: object) -> None:
+        if call_id == "connect":
+            token = self.token_edit.text().strip() or _env_auth_token() or ""
+            message = str(exc)
+            if token:
+                message = message.replace(token, "[REDACTED]")
+            self._connect_in_flight = False
+            self._connect_error = message[:120]
+            self._refresh_controls()
+        elif call_id == "poll":
+            self._poll_timer.stop()
+            self._poll_error = str(exc)[:120]
+            self._refresh_controls()
+        elif call_id == "save":
+            self._save_in_flight = False
+            self._file_error = f"save error: {str(exc)[:100]}"
+            self._refresh_controls()
+        elif call_id == "load":
+            self._load_in_flight = False
+            self._file_error = f"load error: {str(exc)[:100]}"
+            self._refresh_controls()
 
     def _on_start(self) -> None:
         if not self.controller.status.connected:
@@ -1285,6 +1627,16 @@ class MainWindow(QMainWindow):
         self._refresh_controls()
         return 0
 
+    def _poll_once_async(self) -> int:
+        if self._async_runner.is_in_flight("poll"):
+            return 0
+        old_count = len(self.model.events)
+        try:
+            self._async_runner.run(lambda: (old_count, self.controller.pull_logs()), key="poll")
+        except RuntimeError:
+            return 0
+        return 0
+
     # public alias for automation
     def poll_once(self) -> int:
         return self._poll_once()
@@ -1317,6 +1669,26 @@ class MainWindow(QMainWindow):
             return
         self.controller.save_recording(Path(path))
 
+    def _save_snapshot(self, path: Path, metadata: RecordingMetadata, events: list[EventModel]) -> Path:
+        return RecordingStorage.save_json(path, metadata, events)
+
+    def _on_save_async(self) -> None:
+        if self._save_in_flight:
+            return
+        path = self.save_path_provider()
+        if not path:
+            return
+        path = Path(path)
+        metadata = self.controller._recorder.metadata
+        events = self.controller.events
+        self._save_in_flight = True
+        self._file_error = ""
+        self._refresh_controls()
+        try:
+            self._async_runner.run(lambda: self._save_snapshot(path, metadata, events), key="save")
+        except RuntimeError:
+            self._refresh_controls()
+
     def _on_load(self) -> None:
         path = self.open_path_provider()
         if not path:
@@ -1328,13 +1700,34 @@ class MainWindow(QMainWindow):
             self.select_event(self.model.selected_event.id)
         self._refresh_controls()
 
+    def _load_file(self, path: Path):
+        return RecordingStorage.load_json(path)
+
+    def _on_load_async(self) -> None:
+        if self._load_in_flight:
+            return
+        path = self.open_path_provider()
+        if not path:
+            return
+        path = Path(path)
+        self._load_in_flight = True
+        self._file_error = ""
+        self._refresh_controls()
+        try:
+            self._async_runner.run(lambda: self._load_file(path), key="load")
+        except RuntimeError:
+            self._refresh_controls()
+
     # ------------------------------------------------------------------
     # State Refresh
     # ------------------------------------------------------------------
     def _refresh_controls(self) -> None:
         state = self.controller.status.recording_state
-        self.start_btn.setEnabled(state != RecordingState.RECORDING)
+        self.connect_btn.setEnabled(not self._connect_in_flight)
+        self.start_btn.setEnabled(state != RecordingState.RECORDING and not self._connect_in_flight)
         self.stop_btn.setEnabled(state == RecordingState.RECORDING)
+        self.save_btn.setEnabled(not self._save_in_flight)
+        self.load_btn.setEnabled(not self._load_in_flight)
         self._render_status()
 
     def _render_status(self) -> None:
@@ -1351,7 +1744,19 @@ class MainWindow(QMainWindow):
         count = len(self.controller.events)
         visible = len(self._filtered_events()) if hasattr(self, "post_search_edit") else count
 
-        if state == RecordingState.RECORDING:
+        if self._connect_in_flight:
+            dot, label = "#38bdf8", "connecting"
+        elif self._connect_error:
+            dot, label = "#ff5d5d", f"connect error: {self._connect_error}"
+        elif self._save_in_flight:
+            dot, label = "#38bdf8", "saving"
+        elif self._load_in_flight:
+            dot, label = "#38bdf8", "loading"
+        elif self._file_error:
+            dot, label = "#ff5d5d", self._file_error
+        elif self._poll_error:
+            dot, label = "#ff5d5d", f"poll error: {self._poll_error}"
+        elif state == RecordingState.RECORDING:
             if stream == "reconnecting":
                 dot, label = "#facc15", "reconnecting"
             elif stream == "error":
@@ -1474,6 +1879,63 @@ class MainWindow(QMainWindow):
         detail = self.model.selected_detail()
         if detail is not None:
             QApplication.clipboard().setText(detail.raw_json)
+
+    def _event_by_id(self, event_id: str | None) -> EventModel | None:
+        if not event_id:
+            return None
+        return next((event for event in self.model.events if event.id == event_id), None)
+
+    def _compare_selected_event(self) -> None:
+        current = self._selected_event()
+        base = self._event_by_id(self._compare_base_event_id)
+        if current is None or base is None or current.id == base.id:
+            self.eval_result_box.setPlainText("select two different events to compare")
+            return
+
+        changes = compare_event_details(base, current)
+        lines = [f"Compare: {base.summary or base.type} -> {current.summary or current.type}"]
+        if changes:
+            for field, (left, right) in changes.items():
+                lines.append("")
+                lines.append(field)
+                lines.append(f"- {left}")
+                lines.append(f"+ {right}")
+        else:
+            lines.append("")
+            lines.append("No field differences.")
+
+        file_diff = self._file_text_diff(base, current)
+        if file_diff:
+            lines.append("")
+            lines.append("File diff:")
+            lines.extend(file_diff)
+
+        self.eval_result_box.setPlainText("\n".join(lines))
+        self.inspector_tabs.setCurrentWidget(self.raw_json_box)
+
+    def _file_text_diff(self, base: EventModel, current: EventModel) -> list[str]:
+        before = self._event_text_for_diff(base)
+        after = self._event_text_for_diff(current)
+        if before is None or after is None or before == after:
+            return []
+        return list(difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile=base.summary or base.type,
+            tofile=current.summary or current.type,
+            lineterm="",
+        ))
+
+    def _event_text_for_diff(self, event: EventModel) -> str | None:
+        details = event.details or {}
+        for key in ("content", "text", "content_preview", "before_text", "after_text"):
+            value = details.get(key)
+            if isinstance(value, str):
+                return value
+        for ref in event.refs:
+            if ref.content_preview:
+                return ref.content_preview
+        return None
 
     def _populate_object_tree(self, event: EventModel | None) -> None:
         self.object_tree.clear()

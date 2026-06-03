@@ -442,7 +442,12 @@ class BridgeTracerController(QObject):
 
     def load_recording(self, path: Path) -> list[str]:
         metadata, events, errors = RecordingStorage.load_json(path)
-        self._events = events
+        self.apply_loaded_recording(metadata, events)
+        return errors
+
+    def apply_loaded_recording(self, metadata: RecordingMetadata, events: list[EventModel]) -> None:
+        self._events = list(events)
+        self._seen_ids = {event.id for event in events}
         self._recorder = Recorder(on_state_change=self._on_recording_state_change)
         self.status = ControllerStatus(
             connected=self.status.connected,
@@ -450,7 +455,6 @@ class BridgeTracerController(QObject):
             safe_description=self.status.safe_description,
             recording_state=metadata.state,
         )
-        return errors
 
     def _on_recording_state_change(self, _previous: RecordingState, target: RecordingState) -> None:
         self.status = ControllerStatus(

@@ -34,8 +34,12 @@ def _evaluate_current_expression_no_rebuild(self) -> None:
 
 def _refresh_controls_no_width_jitter(self) -> None:
     state = self.controller.status.recording_state
-    self.start_btn.setEnabled(state != RecordingState.RECORDING)
+    connecting = bool(getattr(self, "_connect_in_flight", False))
+    self.connect_btn.setEnabled(not connecting)
+    self.start_btn.setEnabled(state != RecordingState.RECORDING and not connecting)
     self.stop_btn.setEnabled(state == RecordingState.RECORDING)
+    self.save_btn.setEnabled(not bool(getattr(self, "_save_in_flight", False)))
+    self.load_btn.setEnabled(not bool(getattr(self, "_load_in_flight", False)))
     # Render the shared status pill (colour-coded state dot + label + count).
     self._render_status()
 

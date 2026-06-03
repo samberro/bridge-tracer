@@ -11,14 +11,19 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from pathlib import Path
+import time
 
 import pytest
 
+from PySide6.QtCore import QCoreApplication, QEventLoop
 from PySide6.QtWidgets import QApplication, QPushButton, QLineEdit, QAbstractButton
 
 from src.core.schemas import RecordingState
+from src.core.schemas import EventCategory, EventLevel, EventModel
+from src.ui.controller import BridgeTracerController
 from src.ui.interactive_window import InteractiveTracerWindow
 from src.ui.sample_data import build_sample_events
+from src.ui import main_window as main_window_module
 
 
 @pytest.fixture(scope="module")
@@ -58,10 +63,58 @@ def test_initial_recording_controls_state(window):
 def test_connect_uses_typed_url_and_token(window):
     window.url_edit.setText("http://127.0.0.1:9999")
     window.token_edit.setText("secret-token-123")
-    window.connect_btn.click()
+    window._on_connect()
     assert window.controller.status.connected is True
     # token must never be echoed into the visible status string
     assert "secret-token-123" not in window.status_label.text()
+
+
+class SlowTraceClient:
+    def __init__(self, base_url: str, token: str | None = None) -> None:
+        self.base_url = base_url
+        self.token = token
+
+    def trace_available(self) -> bool:
+        time.sleep(0.25)
+        return False
+
+    def safe_describe(self) -> str:
+        return f"base_url={self.base_url}; has_at={'yes' if self.token else 'no'}"
+
+    def close(self) -> None:
+        pass
+
+
+def _pump_until(predicate, *, timeout_s: float = 1.5) -> None:
+    deadline = time.perf_counter() + timeout_s
+    while time.perf_counter() < deadline and not predicate():
+        QCoreApplication.processEvents(QEventLoop.AllEvents, 20)
+        time.sleep(0.01)
+
+
+def test_connect_button_runs_bridge_probe_without_blocking_ui(qapp):
+    ctrl = BridgeTracerController(client_factory=SlowTraceClient)
+    w = InteractiveTracerWindow(events=[], controller=ctrl)
+    w.url_edit.setText("http://slow.bridge")
+    w.token_edit.setText("secret-token-async")
+
+    start = time.perf_counter()
+    w.connect_btn.click()
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.12
+    assert not w.connect_btn.isEnabled()
+    assert "connecting" in w.status_label.text().lower()
+    assert "secret-token-async" not in w.status_label.text()
+
+    _pump_until(lambda: ctrl.status.connected and not w._connect_in_flight)
+
+    assert ctrl.status.connected is True
+    assert w.connect_btn.isEnabled()
+    assert "ready" in w.status_label.text().lower()
+    assert "secret-token-async" not in w.status_label.text()
+    w.close()
+    w.deleteLater()
 
 
 def test_token_field_is_password_masked(window):
@@ -101,6 +154,55 @@ def test_selecting_an_event_updates_the_inspector(window):
     assert "\"type\"" in text
 
 
+def test_compare_action_reports_differences_between_last_two_selected_events(qapp):
+    w = InteractiveTracerWindow(events=build_sample_events())
+
+    w.select_event("evt_llm_request")
+    w.select_event("evt_llm_response")
+    w.compare_btn.click()
+
+    output = w.eval_result_box.toPlainText()
+    assert "Compare:" in output
+    assert "type" in output
+    assert "- llm.request" in output
+    assert "+ llm.response" in output
+    w.close()
+    w.deleteLater()
+
+
+def test_compare_action_shows_file_text_diff(qapp):
+    events = [
+        EventModel(
+            id="file_before",
+            type="file.snapshot",
+            category=EventCategory.FILE,
+            level=EventLevel.INFO,
+            summary="before file",
+            details={"content": "alpha\nbravo\ncharlie\n"},
+        ),
+        EventModel(
+            id="file_after",
+            type="file.changed",
+            category=EventCategory.FILE,
+            level=EventLevel.INFO,
+            summary="after file",
+            details={"content": "alpha\nbravo updated\ncharlie\n"},
+        ),
+    ]
+    w = InteractiveTracerWindow(events=events)
+
+    w.select_event("file_before")
+    w.select_event("file_after")
+    w.compare_btn.click()
+
+    output = w.eval_result_box.toPlainText()
+    assert "File diff:" in output
+    assert "-bravo" in output
+    assert "+bravo updated" in output
+    w.close()
+    w.deleteLater()
+
+
 # --- Save / Load actually persist + restore ---------------------------------
 def test_save_then_load_roundtrip(qapp, tmp_path):
     path = tmp_path / "recording.json"
@@ -108,6 +210,7 @@ def test_save_then_load_roundtrip(qapp, tmp_path):
     w1 = InteractiveTracerWindow(events=build_sample_events())
     w1.save_path_provider = lambda: path
     w1.save_btn.click()
+    _pump_until(lambda: path.exists() and not w1._save_in_flight)
     assert path.exists()
     w1.close()
     w1.deleteLater()
@@ -116,6 +219,7 @@ def test_save_then_load_roundtrip(qapp, tmp_path):
     assert w2.event_count() == 0
     w2.open_path_provider = lambda: path
     w2.load_btn.click()
+    _pump_until(lambda: w2.event_count() == len(build_sample_events()) and not w2._load_in_flight)
     assert w2.event_count() == len(build_sample_events())
     w2.close()
     w2.deleteLater()
@@ -125,5 +229,67 @@ def test_save_is_noop_when_path_provider_returns_none(qapp):
     w = InteractiveTracerWindow(events=build_sample_events())
     w.save_path_provider = lambda: None
     w.save_btn.click()  # must not raise
+    w.close()
+    w.deleteLater()
+
+
+def test_save_button_runs_file_write_without_blocking_ui(qapp, tmp_path, monkeypatch):
+    path = tmp_path / "slow-save.json"
+    calls = {"save": 0}
+    original = main_window_module.RecordingStorage.save_json
+
+    def slow_save(path_arg, metadata, events):
+        calls["save"] += 1
+        time.sleep(0.25)
+        return original(path_arg, metadata, events)
+
+    monkeypatch.setattr(main_window_module.RecordingStorage, "save_json", slow_save)
+    w = InteractiveTracerWindow(events=build_sample_events())
+    w.save_path_provider = lambda: path
+
+    start = time.perf_counter()
+    w.save_btn.click()
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.12
+    assert not w.save_btn.isEnabled()
+    assert "saving" in w.status_label.text().lower()
+
+    _pump_until(lambda: path.exists() and not w._save_in_flight)
+
+    assert calls["save"] == 1
+    assert w.save_btn.isEnabled()
+    w.close()
+    w.deleteLater()
+
+
+def test_load_button_runs_file_read_without_blocking_ui(qapp, tmp_path, monkeypatch):
+    path = tmp_path / "slow-load.json"
+    original_save = main_window_module.RecordingStorage.save_json
+    original_load = main_window_module.RecordingStorage.load_json
+    original_save(path, main_window_module.RecordingMetadata(), build_sample_events())
+    calls = {"load": 0}
+
+    def slow_load(path_arg):
+        calls["load"] += 1
+        time.sleep(0.25)
+        return original_load(path_arg)
+
+    monkeypatch.setattr(main_window_module.RecordingStorage, "load_json", slow_load)
+    w = InteractiveTracerWindow(events=[])
+    w.open_path_provider = lambda: path
+
+    start = time.perf_counter()
+    w.load_btn.click()
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.12
+    assert not w.load_btn.isEnabled()
+    assert "loading" in w.status_label.text().lower()
+
+    _pump_until(lambda: w.event_count() == len(build_sample_events()) and not w._load_in_flight)
+
+    assert calls["load"] == 1
+    assert w.load_btn.isEnabled()
     w.close()
     w.deleteLater()

@@ -7,6 +7,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import httpx
 import pytest
+import time
+from PySide6.QtCore import QCoreApplication, QEventLoop
 from PySide6.QtWidgets import QApplication
 
 from src.core.schemas import RecordingState
@@ -43,6 +45,13 @@ def _controller_for(box):
     return BridgeTracerController(client_factory=factory)
 
 
+def _pump_until(predicate, *, timeout_s: float = 1.5) -> None:
+    deadline = time.perf_counter() + timeout_s
+    while time.perf_counter() < deadline and not predicate():
+        QCoreApplication.processEvents(QEventLoop.AllEvents, 20)
+        time.sleep(0.01)
+
+
 def test_start_ingests_live_bridge_events_into_timeline(qapp, monkeypatch):
     # Log-polling fallback (SSE unavailable). UI refresh is event-driven, so we
     # tick a poll and flush the debounced rebuild to observe the model.
@@ -64,6 +73,47 @@ def test_start_ingests_live_bridge_events_into_timeline(qapp, monkeypatch):
     w._flush_pending_timeline_rebuild()
     assert w.event_count() == 3
     assert "3 events" in w.status_label.text()
+    w.close()
+    w.deleteLater()
+
+
+def test_timer_poll_runs_async_and_skips_overlapping_ticks(qapp, monkeypatch):
+    monkeypatch.setenv("AI_BRIDGE_RECORDING_FALLBACK", "logs")
+    box = [_log(1)]
+    calls = {"logs": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/trace/events":
+            return httpx.Response(404)
+        calls["logs"] += 1
+        time.sleep(0.25)
+        return httpx.Response(200, json={"events": list(box)})
+
+    def factory(*_a, **_k):
+        from src.bridge_client.client import BridgeClient
+        return BridgeClient("http://bridge.test", token="t",
+                            http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+    ctrl = BridgeTracerController(client_factory=factory)
+    ctrl.connect("http://bridge.test", "t")
+    w = InteractiveTracerWindow(events=[], controller=ctrl)
+    w.start_btn.click()
+
+    start = time.perf_counter()
+    assert w._poll_once_async() == 0
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.12
+    assert w._async_runner.is_in_flight("poll")
+    _pump_until(lambda: calls["logs"] == 1)
+    assert w._poll_once_async() == 0
+    assert calls["logs"] == 1
+
+    _pump_until(lambda: not w._async_runner.is_in_flight("poll"))
+    w._flush_pending_timeline_rebuild()
+
+    assert calls["logs"] == 1
+    assert w.event_count() == 1
     w.close()
     w.deleteLater()
 
