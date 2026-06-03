@@ -78,6 +78,33 @@ def test_expanding_collection_reveals_individuals_then_collapses() -> None:
     assert len(view.items_map) == 0
 
 
+def _linked(event_id: str, seconds: int, category: EventCategory) -> EventModel:
+    return EventModel(
+        id=event_id, type=f"{category.value}.event", category=category, level=EventLevel.INFO,
+        summary=f"event {event_id}", run_id="r", request_id="q",
+        timestamp=datetime(2026, 5, 30, 7, 0, 0, tzinfo=timezone.utc) + timedelta(seconds=seconds),
+    )
+
+
+def test_connector_thread_on_select() -> None:
+    view = TimelineView()
+    # Three different-category events in one run/request -> inferred chain a->b->c.
+    events = [_linked("a", 0, EventCategory.HTTP),
+              _linked("b", 1, EventCategory.LLM),
+              _linked("c", 2, EventCategory.TOOL)]
+    view.populate_events(events, "main_desktop_timeline")
+    assert len(view.connectors) >= 2
+
+    view.set_selected_event("a")
+    touching = [c for c in view.connectors if "a" in (c.from_id, c.to_id)]
+    others = [c for c in view.connectors if "a" not in (c.from_id, c.to_id)]
+    assert touching and all(c._state == "focused" for c in touching)
+    assert all(c._state == "dimmed" for c in others)
+
+    view.set_selected_event(None)
+    assert all(c._state == "base" for c in view.connectors)
+
+
 def test_short_runs_are_not_collapsed() -> None:
     view = TimelineView()
     events = [_event(f"s{i}", i) for i in range(3)]  # below COLLAPSE_MIN
