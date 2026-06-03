@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, QTimer, Signal
+from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -315,6 +315,8 @@ class MainWindow(QMainWindow):
         # rebuild. This replaces the poll-timer-as-refresh-clock, so recording
         # updates the UI live without polling.
         self.controller.events_changed.connect(self._schedule_rebuild_from_controller)
+        # Stream state (connecting/reconnecting/error) updates the live pill.
+        self.controller.stream_state_changed.connect(lambda _s: self._render_status())
 
         self._post_filter_text = ""
         self._post_filter_categories: set[EventCategory] = set(EventCategory)
@@ -324,9 +326,11 @@ class MainWindow(QMainWindow):
         self._filter_opacity: QGraphicsOpacityEffect | None = None
         self._zoom_percent = 100
 
+        self._settings = QSettings("BridgeTracer", "BridgeTracer")
         self._build_ui()
         self.set_visual_state(visual_state)
         self._refresh_controls()
+        self._restore_layout()
 
     # ------------------------------------------------------------------
     # UI Building
@@ -426,8 +430,8 @@ class MainWindow(QMainWindow):
         # Right Inspector Panel. Width is controlled by workspace_splitter.
         self.inspector_widget = QFrame()
         self.inspector_widget.setObjectName("inspector_frame")
-        self.inspector_widget.setMinimumWidth(300)
-        self.inspector_widget.setMaximumWidth(900)
+        self.inspector_widget.setMinimumWidth(440)
+        self.inspector_widget.setMaximumWidth(1000)
         self._build_inspector()
         self.workspace_splitter.addWidget(self.inspector_widget)
 
@@ -533,6 +537,11 @@ class MainWindow(QMainWindow):
 
         self.status_label = QLabel()
         self.status_label.setObjectName("status_label")
+        self.status_label.setTextFormat(Qt.RichText)
+        self.status_label.setStyleSheet(
+            "QLabel#status_label { background: #101b2d; border: 1px solid #22324c;"
+            " border-radius: 12px; padding: 4px 12px; font-size: 11px; }"
+        )
         self.toolbar_layout.addWidget(self.status_label)
 
         self.root_layout.addLayout(self.toolbar_layout)
@@ -1193,15 +1202,46 @@ class MainWindow(QMainWindow):
         state = self.controller.status.recording_state
         self.start_btn.setEnabled(state != RecordingState.RECORDING)
         self.stop_btn.setEnabled(state == RecordingState.RECORDING)
-        
-        conn = "connected" if self.controller.status.connected else "disconnected"
+        self._render_status()
+
+    def _render_status(self) -> None:
+        """Render the toolbar status pill: a colour-coded state dot + label +
+        connection + event count. The single always-visible 'are we live?'
+        signal. Driven by recording state and the SSE stream state, so
+        recording / reconnecting / error are impossible to miss. Never includes
+        the bearer token."""
+        if not hasattr(self, "status_label"):
+            return
+        state = self.controller.status.recording_state
+        stream = getattr(self.controller, "stream_state", "idle")
+        connected = self.controller.status.connected
         count = len(self.controller.events)
         visible = len(self._filtered_events()) if hasattr(self, "post_search_edit") else count
-        filter_suffix = "" if visible == count else f" · {visible} shown"
-        self.status_label.setText(f"{state.value} · {conn} · {count} events{filter_suffix}")
 
-        self.rec_state_lbl.setText(state.value)
-        self.rec_count_lbl.setText(str(count))
+        if state == RecordingState.RECORDING:
+            if stream == "reconnecting":
+                dot, label = "#facc15", "reconnecting"
+            elif stream == "error":
+                dot, label = "#ff5d5d", "recording · stream error"
+            else:
+                dot, label = "#22c55e", "recording"
+        elif state == RecordingState.STOPPED:
+            dot, label = "#64748b", "stopped"
+        elif state == RecordingState.FAILED:
+            dot, label = "#ff5d5d", "failed"
+        elif connected:
+            dot, label = "#38bdf8", "ready"
+        else:
+            dot, label = "#64748b", "idle"
+
+        conn = "connected" if connected else "disconnected"
+        suffix = "" if visible == count else f" · {visible} shown"
+        self.status_label.setText(
+            f'<span style="color:{dot};">●</span> {label} · {conn} · {count} events{suffix}'
+        )
+        if hasattr(self, "rec_state_lbl"):
+            self.rec_state_lbl.setText(state.value)
+            self.rec_count_lbl.setText(str(count))
 
     def _refresh_inspector(self) -> None:
         detail = self.model.selected_detail()
@@ -1377,7 +1417,38 @@ class MainWindow(QMainWindow):
         self._evaluate_current_expression()
         self._refresh_inspector()
 
+    def _save_layout(self) -> None:
+        s = getattr(self, "_settings", None)
+        if s is None:
+            return
+        try:
+            s.setValue("geometry", self.saveGeometry())
+            for name in ("workspace_splitter", "surface_splitter", "inspector_splitter"):
+                sp = getattr(self, name, None)
+                if sp is not None:
+                    s.setValue(name, sp.saveState())
+            s.sync()
+        except Exception:
+            pass
+
+    def _restore_layout(self) -> None:
+        s = getattr(self, "_settings", None)
+        if s is None:
+            return
+        try:
+            geo = s.value("geometry")
+            if geo is not None:
+                self.restoreGeometry(geo)
+            for name in ("workspace_splitter", "surface_splitter", "inspector_splitter"):
+                sp = getattr(self, name, None)
+                state = s.value(name)
+                if sp is not None and state is not None:
+                    sp.restoreState(state)
+        except Exception:
+            pass
+
     def closeEvent(self, event) -> None:
+        self._save_layout()
         if getattr(self, "_poll_timer", None) is not None:
             self._poll_timer.stop()
         if getattr(self, "_timeline_rebuild_timer", None) is not None:

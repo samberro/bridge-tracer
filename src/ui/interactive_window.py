@@ -36,17 +36,8 @@ def _refresh_controls_no_width_jitter(self) -> None:
     state = self.controller.status.recording_state
     self.start_btn.setEnabled(state != RecordingState.RECORDING)
     self.stop_btn.setEnabled(state == RecordingState.RECORDING)
-
-    conn = "connected" if self.controller.status.connected else "disconnected"
-    count = len(self.controller.events)
-    visible = len(self._filtered_events()) if hasattr(self, "post_search_edit") else count
-    filter_suffix = "" if visible == count else f" · {visible} shown"
-    label = f"{state.value} · {conn} · {count} events{filter_suffix}"
-    self.status_label.setText(label[:64] + ("…" if len(label) > 64 else ""))
-    self.status_label.setFixedWidth(280)
-
-    self.rec_state_lbl.setText(state.value)
-    self.rec_count_lbl.setText(str(count))
+    # Render the shared status pill (colour-coded state dot + label + count).
+    self._render_status()
 
 
 # Patch the active main window module before exporting the class.
