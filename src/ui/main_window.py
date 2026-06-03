@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QFileDialog,
     QFrame,
@@ -331,6 +332,8 @@ class MainWindow(QMainWindow):
         self._post_filter_text = ""
         self._post_filter_categories: set[EventCategory] = set(EventCategory)
         self._post_errors_only = False
+        self._post_filter_run: str | None = None
+        self._known_runs: list[str] | None = None
         self._filter_panel_visible = False
         self._filter_anim: QPropertyAnimation | None = None
         self._filter_opacity: QGraphicsOpacityEffect | None = None
@@ -579,6 +582,13 @@ class MainWindow(QMainWindow):
         self.post_search_edit.setPlaceholderText("summary, type, details, run_id, request_id…")
         self.post_search_edit.textChanged.connect(self._on_search_text_changed)
         row.addWidget(self.post_search_edit, 1)
+
+        row.addWidget(QLabel("Run"))
+        self.run_selector = QComboBox()
+        self.run_selector.setMinimumWidth(130)
+        self.run_selector.addItem("All runs", None)
+        self.run_selector.currentIndexChanged.connect(self._on_run_selected)
+        row.addWidget(self.run_selector)
 
         self.post_errors_only_chk = QCheckBox("Errors only")
         self.post_errors_only_chk.stateChanged.connect(self._on_post_filter_changed)
@@ -964,6 +974,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _filtered_events(self) -> list[EventModel]:
         events = list(self.model.events)
+        if getattr(self, "_post_filter_run", None):
+            events = [event for event in events if event.run_id == self._post_filter_run]
         if self._post_filter_categories:
             events = [event for event in events if event.category in self._post_filter_categories]
         if self._post_errors_only:
@@ -993,6 +1005,39 @@ class MainWindow(QMainWindow):
         # Coalesce rapid keystrokes; the debounce timer applies the filter.
         self._post_filter_text = self.post_search_edit.text()
         self._search_debounce.start()
+
+    def _on_run_selected(self, _index: int) -> None:
+        self._post_filter_run = self.run_selector.currentData()
+        self._rebuild_timeline()
+        self._refresh_controls()
+
+    def _refresh_run_selector(self) -> None:
+        """Keep the run/session selector in sync with the runs present in the
+        current event set, preserving the user's selection. Cheap: only rebuilds
+        the combo when the set of runs actually changes."""
+        if not hasattr(self, "run_selector"):
+            return
+        runs: list[str] = []
+        seen: set[str] = set()
+        for e in self.model.events:
+            rid = e.run_id
+            if rid and rid not in seen:
+                seen.add(rid)
+                runs.append(rid)
+        if runs == self._known_runs:
+            return
+        self._known_runs = runs
+        current = self.run_selector.currentData()
+        self.run_selector.blockSignals(True)
+        self.run_selector.clear()
+        self.run_selector.addItem("All runs", None)
+        for rid in runs:
+            label = rid if len(rid) <= 20 else f"{rid[:9]}…{rid[-7:]}"
+            self.run_selector.addItem(label, rid)
+        idx = self.run_selector.findData(current)
+        self.run_selector.setCurrentIndex(idx if idx >= 0 else 0)
+        self.run_selector.blockSignals(False)
+        self._post_filter_run = self.run_selector.currentData()
 
     def _toggle_filter_panel(self) -> None:
         self._set_filter_panel_visible(not self._filter_panel_visible)
@@ -1042,9 +1087,15 @@ class MainWindow(QMainWindow):
         for chk in self.post_category_checks.values():
             chk.blockSignals(False)
 
+        if hasattr(self, "run_selector"):
+            self.run_selector.blockSignals(True)
+            self.run_selector.setCurrentIndex(0)
+            self.run_selector.blockSignals(False)
+
         self._post_filter_text = ""
         self._post_errors_only = False
         self._post_filter_categories = set(EventCategory)
+        self._post_filter_run = None
         self._rebuild_timeline()
         self._refresh_controls()
 
@@ -1065,6 +1116,7 @@ class MainWindow(QMainWindow):
         self.zoom_label.setText(f"Zoom {percent}%")
 
     def _rebuild_timeline(self) -> None:
+        self._refresh_run_selector()
         visible_events = self._filtered_events()
         self.timeline_view.selected_event_id = self.model.selected_event_id
         self.timeline_view.populate_events(visible_events, self.visual_state)
