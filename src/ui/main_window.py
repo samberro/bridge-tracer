@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, QTimer, Signal
+from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -324,9 +324,11 @@ class MainWindow(QMainWindow):
         self._filter_opacity: QGraphicsOpacityEffect | None = None
         self._zoom_percent = 100
 
+        self._settings = QSettings("BridgeTracer", "BridgeTracer")
         self._build_ui()
         self.set_visual_state(visual_state)
         self._refresh_controls()
+        self._restore_layout()
 
     # ------------------------------------------------------------------
     # UI Building
@@ -426,8 +428,8 @@ class MainWindow(QMainWindow):
         # Right Inspector Panel. Width is controlled by workspace_splitter.
         self.inspector_widget = QFrame()
         self.inspector_widget.setObjectName("inspector_frame")
-        self.inspector_widget.setMinimumWidth(300)
-        self.inspector_widget.setMaximumWidth(900)
+        self.inspector_widget.setMinimumWidth(440)
+        self.inspector_widget.setMaximumWidth(1000)
         self._build_inspector()
         self.workspace_splitter.addWidget(self.inspector_widget)
 
@@ -1377,7 +1379,38 @@ class MainWindow(QMainWindow):
         self._evaluate_current_expression()
         self._refresh_inspector()
 
+    def _save_layout(self) -> None:
+        s = getattr(self, "_settings", None)
+        if s is None:
+            return
+        try:
+            s.setValue("geometry", self.saveGeometry())
+            for name in ("workspace_splitter", "surface_splitter", "inspector_splitter"):
+                sp = getattr(self, name, None)
+                if sp is not None:
+                    s.setValue(name, sp.saveState())
+            s.sync()
+        except Exception:
+            pass
+
+    def _restore_layout(self) -> None:
+        s = getattr(self, "_settings", None)
+        if s is None:
+            return
+        try:
+            geo = s.value("geometry")
+            if geo is not None:
+                self.restoreGeometry(geo)
+            for name in ("workspace_splitter", "surface_splitter", "inspector_splitter"):
+                sp = getattr(self, name, None)
+                state = s.value(name)
+                if sp is not None and state is not None:
+                    sp.restoreState(state)
+        except Exception:
+            pass
+
     def closeEvent(self, event) -> None:
+        self._save_layout()
         if getattr(self, "_poll_timer", None) is not None:
             self._poll_timer.stop()
         if getattr(self, "_timeline_rebuild_timer", None) is not None:
