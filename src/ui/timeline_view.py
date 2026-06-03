@@ -251,14 +251,35 @@ class CollectionCardItem(QGraphicsObject):
 
 
 class ConnectorItem(QGraphicsObject):
+    """A flow link between two cards. Kept quiet by default (low alpha, 1px) so
+    the card graph never becomes a spider-web; on selection only the selected
+    event's links light up ("thread on select")."""
+
+    _STATE_ALPHA = {"focused": 0.95, "base": None, "dimmed": 0.10}
+
     def __init__(self, start_pos: QPointF, end_pos: QPointF, *, color: str = "#465674", dashed: bool = False,
+                 from_id: str | None = None, to_id: str | None = None,
                  parent: QGraphicsItem | None = None) -> None:
         super().__init__(parent)
         self.start_pos = QPointF(start_pos)
         self.end_pos = QPointF(end_pos)
         self.color = QColor(color)
         self.dashed = dashed
+        self.from_id = from_id
+        self.to_id = to_id
+        # Inferred (dashed) links are quieter than explicit parent/child ones.
+        self._base_alpha = 0.32 if dashed else 0.55
+        self._state = "base"
         self.setZValue(-5)
+
+    def set_state(self, state: str) -> None:
+        if state != self._state:
+            self._state = state
+            self.update()
+
+    def _alpha(self) -> float:
+        override = self._STATE_ALPHA.get(self._state)
+        return self._base_alpha if override is None else override
 
     def boundingRect(self) -> QRectF:
         x_min = min(self.start_pos.x(), self.end_pos.x()) - 70
@@ -272,7 +293,11 @@ class ConnectorItem(QGraphicsObject):
         path = QPainterPath(self.start_pos)
         mid_x = (self.start_pos.x() + self.end_pos.x()) / 2
         path.cubicTo(mid_x, self.start_pos.y(), mid_x, self.end_pos.y(), self.end_pos.x(), self.end_pos.y())
-        painter.setPen(QPen(self.color, 1.25, Qt.DashLine if self.dashed else Qt.SolidLine))
+        col = QColor(self.color)
+        col.setAlphaF(self._alpha())
+        pen = QPen(col, 1.6 if self._state == "focused" else 1.0, Qt.DashLine if self.dashed else Qt.SolidLine)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(path)
 
@@ -325,6 +350,9 @@ class TimelineView(QGraphicsView):
     # single collection card (until the user expands it).
     COLLAPSE_MIN = 5
     COLLECTION_WIDTH = 184.0
+    # Hard cap on rendered events; older ones are dropped from the scene to keep
+    # a very long recording bounded (collection cards already curb item counts).
+    MAX_RENDER_EVENTS = 4000
 
     def __init__(self, parent: QWidget | None = None) -> None:
         self._lane_y: dict[EventCategory, float] = {}
@@ -424,8 +452,24 @@ class TimelineView(QGraphicsView):
         self.selected_event_id = event_id
         for eid, item in self.items_map.items():
             item.set_selected(eid == event_id)
+        self._focus_connectors(event_id)
         if reveal and event_id and event_id in self.items_map:
             self.ensureVisible(self.items_map[event_id], 80, 80)
+
+    def _focus_connectors(self, event_id: str | None) -> None:
+        """Thread-on-select: with a selection, only links touching the selected
+        event are bright; the rest dim. With no selection, links sit at their
+        quiet base alpha (and inferred links hide entirely past a density
+        threshold so a busy graph never reads as a spider-web)."""
+        dense = len(self.items_map) > 150
+        for c in self.connectors:
+            if event_id:
+                c.setVisible(True)
+                c.set_state("focused" if event_id in (c.from_id, c.to_id) else "dimmed")
+            else:
+                # No selection: hide inferred (dashed) links when very dense.
+                c.setVisible(not (dense and c.dashed))
+                c.set_state("base")
 
     def populate_events(self, events: list[EventModel], visual_state: str = "main_desktop_timeline") -> None:
         self.setUpdatesEnabled(False)
@@ -450,6 +494,8 @@ class TimelineView(QGraphicsView):
                 return
 
             sorted_events = sorted(events, key=lambda e: e.timestamp)
+            if len(sorted_events) > self.MAX_RENDER_EVENTS:
+                sorted_events = sorted_events[-self.MAX_RENDER_EVENTS:]
             dense = visual_state == "timeline_filmstrip_focused" or len(sorted_events) > 80
             if getattr(self, "_axis_mode", "fit") == "time":
                 units: list[tuple[str, object]] = [("event", e) for e in sorted_events]
@@ -704,6 +750,6 @@ class TimelineView(QGraphicsView):
         start = start_item.pos() + QPointF(start_item.width, start_item.height / 2)
         end = end_item.pos() + QPointF(0, end_item.height / 2)
         color = CATEGORY_COLORS.get(end_item.event_model.category, "#465674")
-        connector = ConnectorItem(start, end, color=color, dashed=dashed)
+        connector = ConnectorItem(start, end, color=color, dashed=dashed, from_id=from_id, to_id=to_id)
         self._scene.addItem(connector)
         self.connectors.append(connector)
