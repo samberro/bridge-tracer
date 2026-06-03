@@ -625,10 +625,13 @@ class MainWindow(QMainWindow):
         conn_lbl.setStyleSheet("font-size: 10px; font-weight: bold;")
         conn_group.addWidget(conn_lbl)
         
-        for k, v in [("Bridge URL", "http://localhost:8080"), ("Bearer token", "************"), ("Auth status", "valid")]:
+        # Bound to real controller/connection state (never shows the token).
+        self.conn_url_lbl = QLabel("—")
+        self.conn_token_lbl = QLabel("—")
+        self.conn_auth_lbl = QLabel("—")
+        for k, val in [("Bridge URL", self.conn_url_lbl), ("Bearer token", self.conn_token_lbl), ("Auth status", self.conn_auth_lbl)]:
             row = QHBoxLayout()
             row.addWidget(QLabel(k))
-            val = QLabel(v)
             val.setStyleSheet("font-weight: bold;")
             row.addWidget(val, 0, Qt.AlignRight)
             conn_group.addLayout(row)
@@ -662,13 +665,67 @@ class MainWindow(QMainWindow):
         filter_lbl = QLabel("Pre-record")
         filter_lbl.setStyleSheet("font-size: 10px; font-weight: bold;")
         filter_group.addWidget(filter_lbl)
+        self.prerecord_checks: dict[str, QCheckBox] = {}
         for label in ["Record everything", "Only selected session", "Only LLM traffic", "Tool calls", "Errors"]:
             chk = QCheckBox(label)
-            chk.setChecked(True)
+            chk.setChecked(label == "Record everything")
+            if label == "Only selected session":
+                # No session selector yet — disable + mark, never silently no-op.
+                chk.setChecked(False)
+                chk.setEnabled(False)
+                chk.setToolTip("Coming soon — needs a run/session selector")
+                chk.setText("Only selected session (soon)")
+            else:
+                chk.toggled.connect(self._on_prerecord_toggled)
+            self.prerecord_checks[label] = chk
             filter_group.addWidget(chk)
         scroll_layout.addLayout(filter_group)
 
         layout.addWidget(scroll, 1)
+
+    def _on_prerecord_toggled(self, checked: bool) -> None:
+        """Keep 'Record everything' mutually exclusive with the specific filters."""
+        re_chk = self.prerecord_checks.get("Record everything")
+        sender = self.sender()
+        specifics = [c for k, c in self.prerecord_checks.items()
+                     if k not in ("Record everything", "Only selected session")]
+        if sender is re_chk and checked:
+            for c in specifics:
+                c.blockSignals(True)
+                c.setChecked(False)
+                c.blockSignals(False)
+        elif checked and re_chk is not None and re_chk.isChecked():
+            re_chk.blockSignals(True)
+            re_chk.setChecked(False)
+            re_chk.blockSignals(False)
+
+    def _build_prerecord_filter(self):
+        """Translate the sidebar pre-record checkboxes into a callable applied
+        inside Recorder.feed(). Returns None to record everything."""
+        checks = getattr(self, "prerecord_checks", {})
+        re_chk = checks.get("Record everything")
+        if re_chk is not None and re_chk.isChecked():
+            return None
+        cats: list[EventCategory] = []
+        if checks.get("Only LLM traffic") and checks["Only LLM traffic"].isChecked():
+            cats.append(EventCategory.LLM)
+        if checks.get("Tool calls") and checks["Tool calls"].isChecked():
+            cats.append(EventCategory.TOOL)
+        if checks.get("Errors") and checks["Errors"].isChecked():
+            cats.append(EventCategory.ERROR)
+        if not cats:
+            return None
+        from src.core.filters import PreRecordFilter
+        return PreRecordFilter(categories=cats).matches
+
+    def _refresh_connection_panel(self) -> None:
+        if not hasattr(self, "conn_url_lbl"):
+            return
+        url = self.url_edit.text().strip() if hasattr(self, "url_edit") else ""
+        self.conn_url_lbl.setText(url or "—")
+        has_token = bool(self.token_edit.text().strip()) if hasattr(self, "token_edit") else False
+        self.conn_token_lbl.setText("present" if has_token else "none")  # never the token itself
+        self.conn_auth_lbl.setText("valid" if self.controller.status.connected else "disconnected")
 
     def _build_trigger_matrix(self) -> None:
         matrix_content = QWidget()
@@ -1134,6 +1191,9 @@ class MainWindow(QMainWindow):
     def _on_start(self) -> None:
         if not self.controller.status.connected:
             self._on_connect()
+        # Apply the sidebar pre-record filter (what gets captured) before start.
+        if hasattr(self.controller, "set_prefilter") and hasattr(self, "_build_prerecord_filter"):
+            self.controller.set_prefilter(self._build_prerecord_filter())
         self.controller.start_recording()
         self._refresh_controls()
         # SSE recording is event-driven (controller.events_changed → debounced
@@ -1263,6 +1323,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "rec_state_lbl"):
             self.rec_state_lbl.setText(state.value)
             self.rec_count_lbl.setText(str(count))
+        self._refresh_connection_panel()
 
     def _refresh_inspector(self) -> None:
         detail = self.model.selected_detail()

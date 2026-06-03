@@ -219,6 +219,17 @@ class BridgeTracerController(QObject):
         self._log_fallback = False
         self._stream_state = "idle"
         self._last_stream_error = ""
+        self._prefilter: Callable[[EventModel], bool] | None = None
+
+    def set_prefilter(self, fn) -> None:
+        """Set the pre-record filter applied inside Recorder.feed(). None records
+        everything. Applied to the current recorder and any recorder created on
+        the next start."""
+        self._prefilter = fn
+        try:
+            self._recorder._prefilter = fn
+        except Exception:
+            pass
 
     @property
     def events(self) -> list[EventModel]:
@@ -353,11 +364,13 @@ class BridgeTracerController(QObject):
 
         if self._recorder.state == RecordingState.STOPPED:
             self._recorder = Recorder(
+                prefilter=self._prefilter,
                 on_state_change=self._on_recording_state_change,
                 on_stop_subscriptions=self._stop_stream_worker
             )
         else:
             self._recorder._on_stop_subscriptions = self._stop_stream_worker
+            self._recorder._prefilter = self._prefilter
 
         self._seen_ids = set()
         self._log_fallback = False
