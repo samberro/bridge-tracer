@@ -1298,12 +1298,20 @@ class MainWindow(QMainWindow):
 
         for k, v in detail.fields.items():
             row = QHBoxLayout()
-            key_lbl = QLabel(k)
-            key_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
-            val_lbl = QLabel(v)
-            val_lbl.setStyleSheet("font-weight: bold; font-size: 11px;")
-            row.addWidget(key_lbl)
-            row.addWidget(val_lbl, 0, Qt.AlignRight)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(10)
+            key_lbl = QLabel(str(k).upper())
+            key_lbl.setStyleSheet(f"color: {TEXT_DIM}; font-size: 10px; font-weight: bold;")
+            key_lbl.setFixedWidth(110)
+            key_lbl.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            val_lbl = QLabel(str(v))
+            val_lbl.setStyleSheet(
+                f"color: {TEXT}; font-size: 11px; font-family: 'Consolas','Courier New',monospace;"
+            )
+            val_lbl.setWordWrap(True)
+            val_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            row.addWidget(key_lbl, 0, Qt.AlignTop)
+            row.addWidget(val_lbl, 1)
             container = QWidget()
             container.setLayout(row)
             self.fields_layout.addWidget(container)
