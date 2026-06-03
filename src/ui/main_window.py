@@ -517,6 +517,18 @@ class MainWindow(QMainWindow):
         self.zoom_in_btn.clicked.connect(self._zoom_in)
         self.toolbar_layout.addWidget(self.zoom_in_btn)
 
+        self.fit_btn = QPushButton("Fit")
+        self.fit_btn.setObjectName("fit_btn")
+        self.fit_btn.setToolTip("Zoom to fit all events")
+        self.fit_btn.clicked.connect(self._fit_timeline)
+        self.toolbar_layout.addWidget(self.fit_btn)
+
+        self.collapse_btn = QPushButton("Collapse")
+        self.collapse_btn.setObjectName("collapse_btn")
+        self.collapse_btn.setToolTip("Re-collapse all expanded event groups")
+        self.collapse_btn.clicked.connect(self._collapse_timeline_groups)
+        self.toolbar_layout.addWidget(self.collapse_btn)
+
         self.toolbar_layout.addStretch(1)
 
         self.status_label = QLabel()
@@ -955,6 +967,12 @@ class MainWindow(QMainWindow):
 
     def _zoom_out(self) -> None:
         self.timeline_view.zoom_out()
+
+    def _fit_timeline(self) -> None:
+        self.timeline_view.fit_to_events()
+
+    def _collapse_timeline_groups(self) -> None:
+        self.timeline_view.collapse_all_groups()
 
     def _on_timeline_zoom_changed(self, percent: int) -> None:
         self._zoom_percent = percent
