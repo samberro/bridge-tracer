@@ -318,6 +318,16 @@ class MainWindow(QMainWindow):
         # Stream state (connecting/reconnecting/error) updates the live pill.
         self.controller.stream_state_changed.connect(lambda _s: self._render_status())
 
+        # Debounce the post-record search box so typing stays smooth at volume.
+        self._search_debounce = QTimer(self)
+        self._search_debounce.setSingleShot(True)
+        self._search_debounce.setInterval(200)
+        self._search_debounce.timeout.connect(self._on_post_filter_changed)
+        # Per-event search haystack cache (events are immutable, so cache by id).
+        self._haystack_cache: dict[str, str] = {}
+        # event id -> QTreeWidgetItem for O(1) list selection sync.
+        self._list_item_by_id: dict[str, QTreeWidgetItem] = {}
+
         self._post_filter_text = ""
         self._post_filter_categories: set[EventCategory] = set(EventCategory)
         self._post_errors_only = False
@@ -567,7 +577,7 @@ class MainWindow(QMainWindow):
         row.addWidget(QLabel("Search"))
         self.post_search_edit = QLineEdit()
         self.post_search_edit.setPlaceholderText("summary, type, details, run_id, request_id…")
-        self.post_search_edit.textChanged.connect(self._on_post_filter_changed)
+        self.post_search_edit.textChanged.connect(self._on_search_text_changed)
         row.addWidget(self.post_search_edit, 1)
 
         self.post_errors_only_chk = QCheckBox("Errors only")
@@ -903,19 +913,29 @@ class MainWindow(QMainWindow):
             events = [event for event in events if event.category == EventCategory.ERROR or event.level.value == "error"]
         text = self._post_filter_text.strip().casefold()
         if text:
+            cache = self._haystack_cache
             def haystack(event: EventModel) -> str:
-                payload = {
-                    "summary": event.summary,
-                    "type": event.type,
-                    "run_id": event.run_id,
-                    "session_id": event.session_id,
-                    "request_id": event.request_id,
-                    "details": event.details,
-                    "refs": [ref.path for ref in event.refs],
-                }
-                return json.dumps(payload, default=str).casefold()
+                cached = cache.get(event.id)
+                if cached is None:
+                    payload = {
+                        "summary": event.summary,
+                        "type": event.type,
+                        "run_id": event.run_id,
+                        "session_id": event.session_id,
+                        "request_id": event.request_id,
+                        "details": event.details,
+                        "refs": [ref.path for ref in event.refs],
+                    }
+                    cached = json.dumps(payload, default=str).casefold()
+                    cache[event.id] = cached
+                return cached
             events = [event for event in events if text in haystack(event)]
         return events
+
+    def _on_search_text_changed(self) -> None:
+        # Coalesce rapid keystrokes; the debounce timer applies the filter.
+        self._post_filter_text = self.post_search_edit.text()
+        self._search_debounce.start()
 
     def _toggle_filter_panel(self) -> None:
         self._set_filter_panel_visible(not self._filter_panel_visible)
@@ -1004,6 +1024,7 @@ class MainWindow(QMainWindow):
 
     def _populate_events_list(self, events: list[EventModel] | None = None) -> None:
         self.event_list.clear()
+        self._list_item_by_id = {}
         for event in (events if events is not None else self.model.events):
             item = QTreeWidgetItem([
                 event.category.value,
@@ -1015,6 +1036,7 @@ class MainWindow(QMainWindow):
             if color:
                 item.setForeground(0, QColor(color))
             self.event_list.addTopLevelItem(item)
+            self._list_item_by_id[event.id] = item
 
     def _on_selection_changed(self) -> None:
         item = self.event_list.currentItem()
@@ -1027,12 +1049,11 @@ class MainWindow(QMainWindow):
             self._refresh_inspector()
 
     def _sync_event_list_selection(self, event_id: str) -> None:
+        item = self._list_item_by_id.get(event_id)
+        if item is None:
+            return
         self.event_list.blockSignals(True)
-        for i in range(self.event_list.topLevelItemCount()):
-            item = self.event_list.topLevelItem(i)
-            if item.data(0, _ID_ROLE) == event_id:
-                self.event_list.setCurrentItem(item)
-                break
+        self.event_list.setCurrentItem(item)
         self.event_list.blockSignals(False)
 
     def event_count(self) -> int:
@@ -1277,12 +1298,20 @@ class MainWindow(QMainWindow):
 
         for k, v in detail.fields.items():
             row = QHBoxLayout()
-            key_lbl = QLabel(k)
-            key_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
-            val_lbl = QLabel(v)
-            val_lbl.setStyleSheet("font-weight: bold; font-size: 11px;")
-            row.addWidget(key_lbl)
-            row.addWidget(val_lbl, 0, Qt.AlignRight)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(10)
+            key_lbl = QLabel(str(k).upper())
+            key_lbl.setStyleSheet(f"color: {TEXT_DIM}; font-size: 10px; font-weight: bold;")
+            key_lbl.setFixedWidth(110)
+            key_lbl.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            val_lbl = QLabel(str(v))
+            val_lbl.setStyleSheet(
+                f"color: {TEXT}; font-size: 11px; font-family: 'Consolas','Courier New',monospace;"
+            )
+            val_lbl.setWordWrap(True)
+            val_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            row.addWidget(key_lbl, 0, Qt.AlignTop)
+            row.addWidget(val_lbl, 1)
             container = QWidget()
             container.setLayout(row)
             self.fields_layout.addWidget(container)
